@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optplatform"
+version = "0.1.0"
+description = "带上下界整数线性规划的可恢复分支搜索求解平台"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["optplatform*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
