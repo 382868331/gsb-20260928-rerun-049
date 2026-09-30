@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "optplatform"
 version = "0.1.0"
-description = "Exact bounded integer linear optimization platform"
+description = "Exact integer linear optimization platform with bounded/unbounded domains"
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]

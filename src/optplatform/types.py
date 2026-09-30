@@ -27,6 +27,7 @@ class SolveResult:
     best_assignment: dict[str, int] | None
     best_objective: Fraction | None
     bound: Fraction | None
+    improving_direction: dict[str, int] | None
     stop_reason: StopReason
     nodes_evaluated: int
     message: str = ""
@@ -41,6 +42,7 @@ class SolveResult:
             "best_assignment": self.best_assignment,
             "best_objective": _fraction(self.best_objective),
             "bound": _fraction(self.bound),
+            "improving_direction": self.improving_direction,
             "stop_reason": self.stop_reason.value,
             "nodes_evaluated": self.nodes_evaluated,
             "message": self.message,
@@ -55,6 +57,7 @@ class SolveResult:
             dict(data["best_assignment"]) if data.get("best_assignment") is not None else None,
             Fraction(best_objective) if best_objective is not None else None,
             Fraction(bound) if bound is not None else None,
+            dict(data["improving_direction"]) if data.get("improving_direction") is not None else None,
             StopReason(data["stop_reason"]),
             int(data["nodes_evaluated"]),
             data.get("message", ""),
