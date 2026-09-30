@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .model import Problem
-from .proof import Proof, build_proof, verify_proof
+from .proof import Proof, ReviewReport, build_proof, review_proof
 from .search import SearchState
 from .types import SolveResult
+
+
+ARCHIVED_NAMES = ("problem.json", "search.json", "result.json", "proof.json")
 
 
 class SearchStore:
@@ -19,8 +24,10 @@ class SearchStore:
         self.search_path = self.directory / "search.json"
         self.result_path = self.directory / "result.json"
         self.proof_path = self.directory / "proof.json"
+        self.archive_dir = self.directory / "history"
 
     def save_problem(self, problem: Problem) -> None:
+        self._archive_if_stale(problem.canonical_hash())
         _atomic_write_json(self.problem_path, problem.to_dict())
 
     def load_problem(self) -> Problem:
@@ -40,13 +47,36 @@ class SearchStore:
 
     def save_proof(self, problem: Problem, search: SearchState, result: SolveResult) -> Proof:
         proof = build_proof(problem, search, result)
-        if not verify_proof(problem, search, proof):
-            raise RuntimeError("internal proof verification failed")
+        report = review_proof(problem, search, proof)
+        if not report.valid:
+            raise RuntimeError("internal proof review failed: " + "; ".join(report.problems))
         _atomic_write_json(self.proof_path, proof.to_dict())
         return proof
 
     def load_proof(self) -> Proof:
         return Proof.from_dict(_read_json(self.proof_path))
+
+    def review(self) -> ReviewReport:
+        """Reload the saved problem/state/proof from disk and re-check the conclusion."""
+
+        problem = self.load_problem()
+        proof = self.load_proof()
+        search = self.load_state() if self.search_path.exists() else None
+        return review_proof(problem, search, proof)
+
+    def _archive_if_stale(self, new_hash: str) -> None:
+        if not self.problem_path.exists():
+            return
+        existing = Problem.from_dict(_read_json(self.problem_path))
+        if existing.canonical_hash() == new_hash:
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+        destination = self.archive_dir / f"{stamp}-{existing.canonical_hash()[:12]}"
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in ARCHIVED_NAMES:
+            source = self.directory / name
+            if source.exists():
+                shutil.move(str(source), str(destination / name))
 
 
 def _read_json(path: Path) -> Any:

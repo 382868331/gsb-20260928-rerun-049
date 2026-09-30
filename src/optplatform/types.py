@@ -30,6 +30,7 @@ class SolveResult:
     stop_reason: StopReason
     nodes_evaluated: int
     message: str = ""
+    evidence: dict | None = None
 
     @property
     def proven_optimal(self) -> bool:
@@ -44,6 +45,7 @@ class SolveResult:
             "stop_reason": self.stop_reason.value,
             "nodes_evaluated": self.nodes_evaluated,
             "message": self.message,
+            "evidence": self.evidence,
         }
 
     @classmethod
@@ -58,6 +60,7 @@ class SolveResult:
             StopReason(data["stop_reason"]),
             int(data["nodes_evaluated"]),
             data.get("message", ""),
+            data.get("evidence"),
         )
 
 

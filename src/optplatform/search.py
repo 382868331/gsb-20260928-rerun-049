@@ -36,6 +36,7 @@ class SearchState:
     best_objective: Fraction | None = None
     closed_nodes: list[dict] = field(default_factory=list)
     stop_reason: StopReason | None = None
+    box_radius: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +47,7 @@ class SearchState:
             "best_assignment": self.best_assignment,
             "best_objective": _fraction(self.best_objective),
             "stop_reason": None if self.stop_reason is None else self.stop_reason.value,
+            "box_radius": self.box_radius,
             "pending": [_node_to_dict(node) for node in self.pending],
             "closed_nodes": self.closed_nodes,
         }
@@ -63,6 +65,7 @@ class SearchState:
             Fraction(data["best_objective"]) if data.get("best_objective") is not None else None,
             list(data.get("closed_nodes", [])),
             None if stop is None else StopReason(stop),
+            int(data.get("box_radius", 0)),
         )
 
 
@@ -97,12 +100,21 @@ class BranchAndBound:
         root = Node(0, None, 0, root_bounds, self._optimistic(root_bounds))
         return SearchState(self.problem.name, self.problem.canonical_hash(), [root], 1)
 
-    def solve(self, budget: SearchBudget | None = None, state: SearchState | None = None) -> SolveResult:
+    def solve(
+        self,
+        budget: SearchBudget | None = None,
+        state: SearchState | None = None,
+        verify_problem_hash: bool = True,
+    ) -> SolveResult:
+        if not self.problem.all_bounded:
+            from .exact import ExactSolver
+
+            return ExactSolver(self.problem, self.checkpoint_callback).solve(budget, state)
         budget = budget or SearchBudget()
         search = state or self.initial_state()
         if search.problem_name != self.problem.name:
             raise ValueError("checkpoint belongs to a different problem")
-        if search.problem_hash and search.problem_hash != self.problem.canonical_hash():
+        if verify_problem_hash and search.problem_hash and search.problem_hash != self.problem.canonical_hash():
             raise ValueError("checkpoint does not match the immutable problem definition")
 
         search.stop_reason = None
