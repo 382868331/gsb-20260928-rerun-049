@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Callable, Mapping
 
+from .lp import feasible_point, improving_ray, integer_point_along_ray, linear_maximum
 from .model import InvalidProblemError, ObjectiveSense, Problem
 from .types import ResultStatus, SolveResult, StopReason
 
@@ -36,6 +37,8 @@ class SearchState:
     best_objective: Fraction | None = None
     closed_nodes: list[dict] = field(default_factory=list)
     stop_reason: StopReason | None = None
+    phase: str = "branch"
+    improving_direction: dict[str, int] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +51,8 @@ class SearchState:
             "stop_reason": None if self.stop_reason is None else self.stop_reason.value,
             "pending": [_node_to_dict(node) for node in self.pending],
             "closed_nodes": self.closed_nodes,
+            "phase": self.phase,
+            "improving_direction": self.improving_direction,
         }
 
     @classmethod
@@ -63,6 +68,8 @@ class SearchState:
             Fraction(data["best_objective"]) if data.get("best_objective") is not None else None,
             list(data.get("closed_nodes", [])),
             None if stop is None else StopReason(stop),
+            data.get("phase", "branch"),
+            dict(data["improving_direction"]) if data.get("improving_direction") is not None else None,
         )
 
 
@@ -93,9 +100,17 @@ class BranchAndBound:
         self.checkpoint_callback = checkpoint_callback
 
     def initial_state(self) -> SearchState:
-        root_bounds = self.problem.initial_bounds()
-        root = Node(0, None, 0, root_bounds, self._optimistic(root_bounds))
-        return SearchState(self.problem.name, self.problem.canonical_hash(), [root], 1)
+        if self.problem.has_finite_bounds():
+            root_bounds = self.problem.initial_bounds()
+            root = Node(0, None, 0, root_bounds, self._optimistic(root_bounds))
+            return SearchState(self.problem.name, self.problem.canonical_hash(), [root], 1)
+        return SearchState(
+            self.problem.name,
+            self.problem.canonical_hash(),
+            [],
+            0,
+            phase="lp_analysis",
+        )
 
     def solve(self, budget: SearchBudget | None = None, state: SearchState | None = None) -> SolveResult:
         budget = budget or SearchBudget()
@@ -108,15 +123,20 @@ class BranchAndBound:
         search.stop_reason = None
         started = time.monotonic()
 
+        if search.phase == "lp_analysis":
+            if self._budget_reached(budget, search, started):
+                return self._result(search)
+            analysis = self._complete_lp_analysis(search)
+            search.closed_nodes.append(analysis)
+            search.nodes_evaluated += 1
+            if self.checkpoint_callback is not None:
+                self.checkpoint_callback(search)
+            if search.phase == "done":
+                search.pending.clear()
+                return self._result(search)
+
         while search.pending:
-            if budget.max_nodes is not None and search.nodes_evaluated >= budget.max_nodes:
-                search.stop_reason = StopReason.NODE_BUDGET
-                break
-            if budget.max_seconds is not None and time.monotonic() - started >= budget.max_seconds:
-                search.stop_reason = StopReason.TIME_BUDGET
-                break
-            if budget.is_cancelled is not None and budget.is_cancelled():
-                search.stop_reason = StopReason.CANCELLED
+            if self._budget_reached(budget, search, started):
                 break
 
             node = search.pending.pop()
@@ -127,6 +147,74 @@ class BranchAndBound:
                 self.checkpoint_callback(search)
 
         return self._result(search)
+
+    def _budget_reached(self, budget: SearchBudget, search: SearchState, started: float) -> bool:
+        if budget.max_nodes is not None and search.nodes_evaluated >= budget.max_nodes:
+            search.stop_reason = StopReason.NODE_BUDGET
+            return True
+        if budget.max_seconds is not None and time.monotonic() - started >= budget.max_seconds:
+            search.stop_reason = StopReason.TIME_BUDGET
+            return True
+        if budget.is_cancelled is not None and budget.is_cancelled():
+            search.stop_reason = StopReason.CANCELLED
+            return True
+        return False
+
+    def _complete_lp_analysis(self, search: SearchState) -> dict:
+        rows = self.problem.polyhedron_rows()
+        point = feasible_point(self.problem.variable_names, rows)
+        if point is None:
+            search.phase = "done"
+            return {"node_id": 0, "reason": "linear_relaxation_infeasible"}
+
+        sign = 1 if self.problem.sense == ObjectiveSense.MAXIMIZE else -1
+        objective = {name: sign * Fraction(value) for name, value in self.problem.objective.items()}
+        direction = improving_ray(self.problem.variable_names, rows, objective)
+        if direction is not None:
+            assignment = integer_point_along_ray(
+                point,
+                direction,
+                self.problem.variable_names,
+            )
+            search.best_assignment = assignment
+            search.best_objective = self._transformed_value(assignment)
+            search.improving_direction = direction
+            search.phase = "done"
+            return {
+                "node_id": 0,
+                "reason": "integer_unbounded_witness",
+                "assignment": assignment,
+                "objective": str(search.best_objective),
+                "direction": direction,
+            }
+        else:
+            bounds = self._finite_bounds(rows)
+            if bounds is None:
+                search.phase = "unsupported"
+                return {"node_id": 0, "reason": "integer_search_on_unbounded_neutral_direction_not_certified"}
+        root = Node(search.next_node_id, None, 0, bounds, self._optimistic(bounds))
+        search.next_node_id += 1
+        search.pending.append(root)
+        search.phase = "branch"
+        return {
+            "node_id": root.node_id,
+            "reason": "linear_feasibility_witness",
+            "rational_point": {name: str(value) for name, value in point.items()},
+            "improving_direction": direction,
+        }
+
+    def _finite_bounds(self, rows) -> dict[str, tuple[int, int]] | None:
+        bounds: dict[str, tuple[int, int]] = {}
+        for variable in self.problem.variables:
+            if variable.upper is not None:
+                bounds[variable.name] = (variable.lower, variable.upper)
+            else:
+                maximum = linear_maximum(self.problem.variable_names, rows, {variable.name: 1})
+                if maximum is None:
+                    return None
+                cap = max(variable.lower, maximum.numerator // maximum.denominator)
+                bounds[variable.name] = (variable.lower, cap)
+        return bounds
 
     def _evaluate(self, node: Node, search: SearchState) -> dict:
         if any(low > high for low, high in node.bounds.values()):
@@ -158,11 +246,15 @@ class BranchAndBound:
             if search.best_objective is None or value > search.best_objective:
                 search.best_objective = value
                 search.best_assignment = assignment
+            if search.improving_direction is not None:
+                search.pending.clear()
+                search.phase = "done"
             return {
                 "node_id": node.node_id,
-                "reason": "integer_solution",
+                "reason": "integer_unbounded_witness" if search.improving_direction is not None else "integer_solution",
                 "assignment": assignment,
                 "objective": str(value),
+                "direction": search.improving_direction,
             }
 
         variable = self.branching_strategy.select_variable(self.problem, node.bounds)
@@ -222,6 +314,41 @@ class BranchAndBound:
                 search.stop_reason or StopReason.NODE_BUDGET,
                 search.nodes_evaluated,
                 "stopped before every open branch was closed",
+                None,
+            )
+
+        if search.phase == "lp_analysis":
+            return SolveResult(
+                ResultStatus.UNSOLVED,
+                None,
+                None,
+                None,
+                search.stop_reason or StopReason.NODE_BUDGET,
+                search.nodes_evaluated,
+                "stopped before the linear feasibility and recession-ray checks",
+            )
+
+        if search.phase == "unsupported":
+            return SolveResult(
+                ResultStatus.UNSOLVED,
+                None,
+                None,
+                None,
+                StopReason.COMPLETED,
+                search.nodes_evaluated,
+                "the linear polyhedron has an objective-neutral unbounded direction; no finite integer conclusion is certified",
+            )
+
+        if search.improving_direction is not None and search.best_assignment is not None:
+            return SolveResult(
+                ResultStatus.UNBOUNDED,
+                _copy(search.best_assignment),
+                None,
+                None,
+                StopReason.COMPLETED,
+                search.nodes_evaluated,
+                "a feasible integer point plus an improving integer recession direction certify unboundedness",
+                _copy(search.improving_direction),
             )
 
         if search.best_assignment is None:
@@ -233,6 +360,7 @@ class BranchAndBound:
                 StopReason.COMPLETED,
                 search.nodes_evaluated,
                 "every branch is infeasible or empty",
+                None,
             )
 
         return SolveResult(
@@ -243,6 +371,7 @@ class BranchAndBound:
             StopReason.COMPLETED,
             search.nodes_evaluated,
             "every branch is closed and the incumbent bound is tight",
+            None,
         )
 
     def current_bound(self, search: SearchState) -> Fraction | None:

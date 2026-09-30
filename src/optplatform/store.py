@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .model import Problem
-from .proof import Proof, build_proof, verify_proof
+from .proof import Proof, VerificationReport, build_proof, review_proof, verify_proof
 from .search import SearchState
 from .types import SolveResult
 
@@ -47,6 +47,13 @@ class SearchStore:
 
     def load_proof(self) -> Proof:
         return Proof.from_dict(_read_json(self.proof_path))
+
+    def review_saved(self, problem: Problem | None = None) -> VerificationReport:
+        saved_problem = self.load_problem()
+        proof = self.load_proof()
+        search = self.load_state()
+        result = self.load_result()
+        return review_proof(problem or saved_problem, proof, search, result)
 
 
 def _read_json(path: Path) -> Any:

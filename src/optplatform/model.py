@@ -18,14 +18,14 @@ class InvalidProblemError(ValueError):
 class Variable:
     name: str
     lower: int
-    upper: int
+    upper: int | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise InvalidProblemError("variable name must be a non-empty string")
-        if not _is_int(self.lower) or not _is_int(self.upper):
+        if not _is_int(self.lower) or (self.upper is not None and not _is_int(self.upper)):
             raise InvalidProblemError(f"variable {self.name!r} bounds must be integers")
-        if self.lower > self.upper:
+        if self.upper is not None and self.lower > self.upper:
             raise InvalidProblemError(f"variable {self.name!r} has an empty domain")
 
 
@@ -105,7 +105,23 @@ class Problem:
         return tuple(variable.name for variable in self.variables)
 
     def initial_bounds(self) -> dict[str, tuple[int, int]]:
+        if any(variable.upper is None for variable in self.variables):
+            raise InvalidProblemError("an unbounded problem must first be normalized for branch search")
         return {variable.name: (variable.lower, variable.upper) for variable in self.variables}
+
+    def has_finite_bounds(self) -> bool:
+        return all(variable.upper is not None for variable in self.variables)
+
+    def polyhedron_rows(self) -> list[tuple[dict[str, Number], Number]]:
+        rows: list[tuple[dict[str, Number], Number]] = [
+            (dict(constraint.coefficients), constraint.rhs)
+            for constraint in self.constraints
+        ]
+        for variable in self.variables:
+            rows.append(({variable.name: -1}, -variable.lower))
+            if variable.upper is not None:
+                rows.append(({variable.name: 1}, variable.upper))
+        return rows
 
     def canonical_hash(self) -> str:
         encoded = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()
@@ -120,7 +136,9 @@ class Problem:
     def is_feasible(self, assignment: Mapping[str, int]) -> bool:
         for variable in self.variables:
             value = assignment[variable.name]
-            if not _is_int(value) or value < variable.lower or value > variable.upper:
+            if not _is_int(value) or value < variable.lower:
+                return False
+            if variable.upper is not None and value > variable.upper:
                 return False
         for constraint in self.constraints:
             left = sum(
@@ -161,7 +179,11 @@ class Problem:
         return cls(
             data["name"],
             [
-                Variable(item["name"], int(item["lower"]), int(item["upper"]))
+                Variable(
+                    item["name"],
+                    int(item["lower"]),
+                    None if item.get("upper") is None else int(item["upper"]),
+                )
                 for item in data["variables"]
             ],
             {

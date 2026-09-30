@@ -9,6 +9,7 @@ from optplatform import (
     Constraint,
     ObjectiveSense,
     Problem,
+    review_proof,
     ResultStatus,
     SearchBudget,
     SearchStore,
@@ -25,6 +26,28 @@ def make_problem() -> Problem:
         [Variable("x", 0, 2), Variable("y", 0, 2)],
         {"x": 5, "y": 4},
         [Constraint("capacity", {"x": 2, "y": 1}, 3)],
+    )
+
+
+def unbounded_problem() -> Problem:
+    return Problem("unbounded", [Variable("x", 0, None)], {"x": 1}, [])
+
+
+def finite_unbounded_variable_problem() -> Problem:
+    return Problem(
+        "finite-unbounded-variable",
+        [Variable("x", 0, None)],
+        {"x": 1},
+        [Constraint("upper", {"x": 1}, 2)],
+    )
+
+
+def infeasible_unbounded_variable_problem() -> Problem:
+    return Problem(
+        "infeasible-unbounded-variable",
+        [Variable("x", 0, None)],
+        {"x": 1},
+        [Constraint("impossible", {"x": 1}, -1)],
     )
 
 
@@ -46,6 +69,41 @@ class SolverTests(unittest.TestCase):
         result = BranchAndBound(problem).solve()
         self.assertIs(result.status, ResultStatus.INFEASIBLE)
         self.assertIsNone(result.best_assignment)
+
+    def test_unbounded_variable_is_accepted_and_certified(self) -> None:
+        problem = unbounded_problem()
+        result = BranchAndBound(problem).solve()
+        self.assertIs(result.status, ResultStatus.UNBOUNDED)
+        self.assertTrue(problem.is_feasible(result.best_assignment))
+        self.assertEqual(result.direction, {"x": 1})
+        self.assertEqual(problem.objective_value(result.direction), Fraction(1))
+
+    def test_unbounded_variable_with_finite_optimum(self) -> None:
+        result = BranchAndBound(finite_unbounded_variable_problem()).solve()
+        self.assertIs(result.status, ResultStatus.OPTIMAL)
+        self.assertEqual(result.best_assignment, {"x": 2})
+        self.assertEqual(result.best_objective, Fraction(2))
+
+    def test_unbounded_variable_with_infeasible_domain(self) -> None:
+        result = BranchAndBound(infeasible_unbounded_variable_problem()).solve()
+        self.assertIs(result.status, ResultStatus.INFEASIBLE)
+        self.assertIsNone(result.best_assignment)
+
+    def test_unbounded_cases_resume_after_exhausted_budget(self) -> None:
+        cases = [
+            (unbounded_problem(), ResultStatus.UNBOUNDED),
+            (finite_unbounded_variable_problem(), ResultStatus.OPTIMAL),
+            (infeasible_unbounded_variable_problem(), ResultStatus.INFEASIBLE),
+        ]
+        for problem, expected in cases:
+            with self.subTest(problem=problem.name):
+                state = BranchAndBound(problem).initial_state()
+                stopped = BranchAndBound(problem).solve(SearchBudget(max_nodes=0), state)
+                self.assertIs(stopped.status, ResultStatus.UNSOLVED)
+                self.assertIs(stopped.stop_reason, StopReason.NODE_BUDGET)
+                resumed = BranchAndBound(problem).solve(state=state)
+                self.assertIs(resumed.status, expected)
+                self.assertIs(resumed.stop_reason, StopReason.COMPLETED)
 
     def test_budget_returns_best_known_not_optimal(self) -> None:
         problem = make_problem()
@@ -105,6 +163,43 @@ class SolverTests(unittest.TestCase):
                 self.assertTrue((Path(directory) / filename).is_file())
             self.assertTrue(verify_proof(store.load_problem(), store.load_state(), store.load_proof()))
             self.assertEqual(proof.status, ResultStatus.OPTIMAL)
+
+    def test_saved_unbounded_proof_rechecks_and_rejects_changed_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SearchStore(directory)
+            problem = unbounded_problem()
+            solver = BranchAndBound(problem, checkpoint_callback=store.save_state)
+            result = solver.solve()
+            state = store.load_state()
+            store.save_problem(problem)
+            store.save_result(result)
+            proof = store.save_proof(problem, state, result)
+            self.assertTrue(store.review_saved().valid)
+
+            changed = Problem(
+                problem.name,
+                list(problem.variables),
+                dict(problem.objective),
+                [Constraint("new-upper", {"x": 1}, 0)],
+            )
+            review = store.review_saved(changed)
+            self.assertFalse(review.valid)
+            self.assertTrue(any("changed constraint invalidates" in message for message in review.errors))
+            self.assertEqual(store.load_proof().direction, proof.direction)
+            self.assertEqual(store.load_problem().constraints, ())
+
+    def test_proof_review_reports_invalid_unbounded_direction(self) -> None:
+        from dataclasses import replace
+        from optplatform.proof import build_proof
+
+        problem = unbounded_problem()
+        state = BranchAndBound(problem).initial_state()
+        result = BranchAndBound(problem).solve(state=state)
+        valid_proof = build_proof(problem, state, result)
+        invalid_proof = replace(valid_proof, direction={"x": -1})
+        review = review_proof(problem, invalid_proof, state, result)
+        self.assertFalse(review.valid)
+        self.assertTrue(any("decreases unbounded variable" in message for message in review.errors))
 
     def test_minimization_and_branching_strategy_do_not_change_meaning(self) -> None:
         problem = Problem(

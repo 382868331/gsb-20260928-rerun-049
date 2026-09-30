@@ -1,5 +1,5 @@
 from .model import Constraint, ObjectiveSense, Problem, Variable
-from .proof import verify_proof
+from .proof import VerificationReport, review_proof, verify_proof
 from .search import BranchAndBound, BranchingStrategy, SearchBudget, SearchState, WidestDomain
 from .store import SearchStore
 from .types import ResultStatus, SolveResult, StopReason
@@ -16,7 +16,9 @@ __all__ = [
     "SearchStore",
     "SolveResult",
     "StopReason",
+    "VerificationReport",
     "Variable",
     "WidestDomain",
     "verify_proof",
+    "review_proof",
 ]

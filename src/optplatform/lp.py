@@ -84,6 +84,32 @@ def integer_point_along_ray(
     }
 
 
+def linear_maximum(
+    variables: Sequence[str],
+    constraints: Sequence[tuple[Mapping[str, Number], Number]],
+    objective: Mapping[str, Number],
+) -> Fraction | None:
+    """Return the exact rational maximum, or None when the linear form is unbounded above."""
+
+    if improving_ray(variables, constraints, objective) is not None:
+        return None
+    z = "__linear_objective__"
+    rows = [
+        ({name: Fraction(value) for name, value in row.items()}, Fraction(rhs))
+        for row, rhs in constraints
+    ]
+    rows.append(
+        (
+            {**{name: -Fraction(value) for name, value in objective.items()}, z: Fraction(1)},
+            Fraction(0),
+        )
+    )
+    point = _solve(rows, list(variables) + [z])
+    if point is None:
+        return None
+    return point[z]
+
+
 def _solve(
     system: list[tuple[dict[str, Fraction], Fraction]],
     variables: list[str],
@@ -107,14 +133,13 @@ def _solve(
             normalized = {key: value / coefficient for key, value in row.items() if key != name}
             positive.append((normalized, rhs / coefficient, coefficient))
         else:
-            normalized = {key: value / -coefficient for key, value in row.items() if key != name}
-            normalized = {key: -value for key, value in normalized.items()}
-            negative.append((normalized, -rhs / coefficient, -coefficient))
+            normalized = {key: value / coefficient for key, value in row.items() if key != name}
+            negative.append((normalized, rhs / coefficient, -coefficient))
 
     for upper_row, upper_rhs, _ in positive:
         for lower_row, lower_rhs, _ in negative:
             row = {
-                key: lower_row.get(key, Fraction(0)) - upper_row.get(key, Fraction(0))
+                key: upper_row.get(key, Fraction(0)) - lower_row.get(key, Fraction(0))
                 for key in set(lower_row) | set(upper_row)
             }
             row = {key: value for key, value in row.items() if value != 0}
@@ -126,9 +151,9 @@ def _solve(
 
     upper_bounds: list[Fraction] = []
     lower_bounds: list[Fraction] = []
-    for row, rhs in positive:
+    for row, rhs, _ in positive:
         upper_bounds.append(rhs - sum(row.get(key, 0) * values[key] for key in rest))
-    for row, rhs in negative:
+    for row, rhs, _ in negative:
         lower_bounds.append(rhs - sum(row.get(key, 0) * values[key] for key in rest))
 
     upper = min(upper_bounds) if upper_bounds else None
