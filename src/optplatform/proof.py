@@ -69,7 +69,10 @@ def build_proof(problem: Problem, search: SearchState, result: SolveResult) -> P
     elif result.status is ResultStatus.BEST_KNOWN:
         claim = "only the incumbent is known; no optimum is claimed"
     else:
-        claim = "no feasible solution was found before search stopped; no optimum is claimed"
+        if search.phase == "unsupported" and not search.pending:
+            claim = "the polyhedron has an uncertified objective-neutral unbounded direction; no conclusion is claimed"
+        else:
+            claim = "no feasible solution was found before search stopped; no optimum is claimed"
     objective = result.best_objective
     if objective is None and result.best_assignment is not None:
         objective = problem.objective_value(result.best_assignment)
@@ -127,8 +130,10 @@ def review_proof(
             if not search.pending or proof.assignment is None:
                 errors.append("best_known proof requires open branches and a feasible incumbent")
         elif proof.status is ResultStatus.UNSOLVED:
-            if not search.pending or proof.assignment is not None:
+            if proof.assignment is not None:
                 errors.append("unsolved proof requires open branches and must not present an incumbent")
+            elif not search.pending and search.phase not in ("unsupported", "lp_analysis"):
+                errors.append("unsolved proof requires open branches or an uncertified unbounded direction")
         elif proof.status is ResultStatus.UNBOUNDED:
             if proof.assignment is None or proof.direction is None:
                 errors.append("unbounded proof requires both a feasible integer point and an improving direction")

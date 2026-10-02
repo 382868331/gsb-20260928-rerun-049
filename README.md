@@ -38,6 +38,24 @@ if not report.valid:
 
 把修改后的约束传给 `review_saved(changed_problem)` 只会复核，不会覆盖保存的原问题和旧证明；指纹不匹配会作为错误明确报告。
 
+## 参数扫描
+
+`ParameterSweep` 比较同一问题在参数区间内的结论变化。用 `ParameterAxis` 指定一个目标系数（`AxisKind.OBJECTIVE_COEFFICIENT`）或约束边界（`AxisKind.CONSTRAINT_RHS`）及一组离散参数点；每个点独立求解、独立保存 `problem.json` / `search.json` / `result.json` / `proof.json` 和本次预算，结论按 `optimal` / `infeasible` / `unbounded` 归类为已核实，`best_known` / `unsolved` 及未运行的点保留在 `summary().pending` 中。离散点不会被连成确定区间——没有逐点证明的位置一律不算有结论。
+
+相邻参数点会把最近已求解点的可行解作为热启动候选，但候选先对当前参数问题重新做 `is_feasible` 核对，结论仍由当前参数的完整搜索和证明得出，旧证明不覆盖整段范围。`refine(...)` 可在结论变化附近追加检查点；`run(should_stop=...)` 暂停后可用 `ParameterSweep.load(dir)` 断点续跑；`derive(point_index, new_axis, dir)` 从一个已核实点派生另一维参数扫描，原扫描记录保持可查、不被修改。
+
+```python
+sweep = ParameterSweep.create(
+    problem,
+    ParameterAxis(AxisKind.CONSTRAINT_RHS, "cap", [-1, 0, 1, 2]),
+    "runs/cap-sweep",
+)
+summary = sweep.run(SearchBudget(max_nodes=1000))
+report = sweep.review_point(0)  # 独立复核某个参数点的证明
+```
+
+注意：若多面体在目标方向有界但存在目标中性的无界方向，对应参数点保持 `unsolved`（见“结果语义”），不会被误认为有限最优或无界。示例见 `examples/sweep_example.py`。
+
 ## 快速开始
 
 ```python
