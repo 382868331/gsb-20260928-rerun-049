@@ -38,6 +38,36 @@ if not report.valid:
 
 把修改后的约束传给 `review_saved(changed_problem)` 只会复核，不会覆盖保存的原问题和旧证明；指纹不匹配会作为错误明确报告。
 
+## 参数扫描
+
+`ParameterSweep` 比较同一问题在单个参数（目标系数或约束边界）取不同整数值时的结论。每个参数点在 `points/<值>/` 下独立保存问题、搜索状态、结果和证明，结论必须对当前参数重新求解并复核通过才标记为 `verified`；相邻点的最优解只作为暖启动候选，注入前会用当前参数重新做可行性检查。
+
+```python
+from optplatform import Constraint, ParameterAxis, ParameterSweep, Problem, Variable
+
+problem = Problem(
+    "capacity",
+    [Variable("x", 0, 5)],
+    {"x": 1},
+    [Constraint("cap", {"x": 1}, 0)],
+)
+sweep = ParameterSweep(
+    "runs/cap-sweep",
+    problem,
+    ParameterAxis(ParameterAxis.CONSTRAINT_RHS, "cap"),
+    [-1, 0, 3],
+)
+sweep.run()
+sweep.summary()
+# {'verified': {'infeasible': [-1], 'optimal': [0, 3]}, 'unresolved': [], 'pending': [], ...}
+```
+
+- 预算耗尽或取消时该点保持未核实并留在 `pending`，恢复 `run()` 后重求；求解器自身无法证书化的点（如目标中性无界方向）记入 `unresolved`，不会被连成确定区间。
+- `summary()` 只列出逐一核实的离散点，明确不声称点与点之间的区间结论。
+- `add_checkpoints(values)` 在结论变化附近追加检查点；已核实的点不会重求。
+- `run(max_points=k)` 可暂停，重新构造 `ParameterSweep` 会从 `sweep.json` 清单恢复进度；清单与基准问题或参数轴不匹配会报错。
+- `sweep.derive(已核实值, 新轴, 新取值, 新目录)` 从一个已核实点派生另一组参数变化，原扫描记录保持可查。
+
 ## 快速开始
 
 ```python
