@@ -1,6 +1,7 @@
 from .model import Constraint, ObjectiveSense, Problem, Variable
 from .grid import (
     GridPoint,
+    ModelChange,
     ParameterStudy2D,
     RegionConclusion,
     RegionReport,
@@ -18,6 +19,7 @@ __all__ = [
     "BranchingStrategy",
     "Constraint",
     "GridPoint",
+    "ModelChange",
     "ObjectiveSense",
     "ParameterAxis",
     "ParameterStudy2D",

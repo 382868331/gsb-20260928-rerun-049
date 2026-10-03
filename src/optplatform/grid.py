@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -21,6 +21,32 @@ from .types import ResultStatus
 
 
 Coordinate = tuple[int, int]
+
+
+class ModelChange:
+    PARAMETER_RANGE = "parameter_range"
+    CONSTRAINT_TIGHTENED = "constraint_tightened"
+    CONSTRAINT_RELAXED = "constraint_relaxed"
+    OBJECTIVE_CHANGED = "objective_changed"
+
+    ALL = {
+        PARAMETER_RANGE,
+        CONSTRAINT_TIGHTENED,
+        CONSTRAINT_RELAXED,
+        OBJECTIVE_CHANGED,
+    }
+
+
+REUSED_STATUSES = {
+    ModelChange.PARAMETER_RANGE: {
+        ResultStatus.OPTIMAL.value,
+        ResultStatus.INFEASIBLE.value,
+        ResultStatus.UNBOUNDED.value,
+    },
+    ModelChange.CONSTRAINT_TIGHTENED: {ResultStatus.INFEASIBLE.value},
+    ModelChange.CONSTRAINT_RELAXED: {ResultStatus.UNBOUNDED.value},
+    ModelChange.OBJECTIVE_CHANGED: {ResultStatus.INFEASIBLE.value},
+}
 
 
 @dataclass(frozen=True)
@@ -72,9 +98,35 @@ class RegionConclusion:
     y_max: int
     status: str
     depends_on: tuple[Coordinate, ...]
+    coordinates: tuple[Coordinate, ...] = ()
+    model_hash: str = ""
+    model_version: str = "current"
+    reused_from: dict | None = field(default=None)
+
+    def __post_init__(self) -> None:
+        if not self.coordinates:
+            object.__setattr__(
+                self,
+                "coordinates",
+                tuple(
+                    (x, y)
+                    for x in range(self.x_min, self.x_max + 1)
+                    for y in range(self.y_min, self.y_max + 1)
+                ),
+            )
+        else:
+            coordinates = tuple(sorted((int(x), int(y)) for x, y in self.coordinates))
+            object.__setattr__(self, "coordinates", coordinates)
+            object.__setattr__(self, "x_min", coordinates[0][0])
+            object.__setattr__(self, "x_max", coordinates[-1][0])
+            object.__setattr__(self, "y_min", min(y for _, y in coordinates))
+            object.__setattr__(self, "y_max", max(y for _, y in coordinates))
 
     def contains(self, x: int, y: int) -> bool:
-        return self.x_min <= x <= self.x_max and self.y_min <= y <= self.y_max
+        return (int(x), int(y)) in set(self.coordinates)
+
+    def coordinate_set(self) -> set[Coordinate]:
+        return set(self.coordinates)
 
     def to_dict(self) -> dict:
         return {
@@ -84,6 +136,10 @@ class RegionConclusion:
             "y_max": self.y_max,
             "status": self.status,
             "depends_on": [list(coordinate) for coordinate in self.depends_on],
+            "coordinates": [list(coordinate) for coordinate in self.coordinates],
+            "model_hash": self.model_hash,
+            "model_version": self.model_version,
+            "reused_from": self.reused_from,
         }
 
     @classmethod
@@ -95,6 +151,10 @@ class RegionConclusion:
             int(data["y_max"]),
             data["status"],
             tuple((int(pair[0]), int(pair[1])) for pair in data.get("depends_on", [])),
+            tuple((int(pair[0]), int(pair[1])) for pair in data.get("coordinates", [])),
+            data.get("model_hash", ""),
+            data.get("model_version", "current"),
+            data.get("reused_from"),
         )
 
 
@@ -110,6 +170,7 @@ class RegionReport:
     mismatched: tuple[tuple[Coordinate, str], ...]
     statuses: Mapping[Coordinate, str]
     conclusion: RegionConclusion | None
+    reused: bool = False
 
 
 def region_overlap(first: RegionConclusion, second: RegionConclusion) -> tuple[int, int, int, int] | None:
@@ -128,7 +189,19 @@ def region_conflicts(regions: Sequence[RegionConclusion]) -> list[dict]:
         for second in regions[index + 1 :]:
             if first.status == second.status:
                 continue
-            overlap = region_overlap(first, second)
+            if first.model_hash != second.model_hash or first.model_version != second.model_version:
+                continue
+            shared = first.coordinate_set() & second.coordinate_set()
+            overlap = (
+                (
+                    min(x for x, _ in shared),
+                    max(x for x, _ in shared),
+                    min(y for _, y in shared),
+                    max(y for _, y in shared),
+                )
+                if shared
+                else None
+            )
             if overlap is None:
                 continue
             x_min, x_max, y_min, y_max = overlap
@@ -152,6 +225,9 @@ class ParameterStudy2D:
         axis_y: ParameterAxis,
         values_y: Sequence[int],
         budget: SearchBudget | None = None,
+        model_version: str = "current",
+        parent_directory: str | Path | None = None,
+        change_type: str | None = None,
     ):
         if axis_x == axis_y:
             raise ValueError("the two parameter axes must be distinct")
@@ -162,6 +238,9 @@ class ParameterStudy2D:
         self.axis_x = axis_x
         self.axis_y = axis_y
         self.budget = budget or SearchBudget()
+        self.model_version = model_version
+        self.parent_directory = None if parent_directory is None else str(Path(parent_directory))
+        self.change_type = change_type
         self._points: dict[Coordinate, GridPoint] = {}
         self._pending: list[Coordinate] = []
         self._regions: list[RegionConclusion] = []
@@ -189,12 +268,18 @@ class ParameterStudy2D:
             (int(pair[0]), int(pair[1])) for pair in data.get("pending", [])
         )
         self._regions = [RegionConclusion.from_dict(item) for item in data.get("regions", [])]
+        self.model_version = data.get("model_version", "current")
+        self.parent_directory = data.get("parent_directory")
+        self.change_type = data.get("change_type")
 
     def _save(self) -> None:
         payload = {
             "base_problem": self.base_problem.to_dict(),
             "axis_x": self.axis_x.to_dict(),
             "axis_y": self.axis_y.to_dict(),
+            "model_version": self.model_version,
+            "parent_directory": self.parent_directory,
+            "change_type": self.change_type,
             "points": [self._points[key].to_dict() for key in sorted(self._points)],
             "pending": [list(pair) for pair in sorted(self._pending)],
             "regions": [region.to_dict() for region in self._regions],
@@ -233,6 +318,9 @@ class ParameterStudy2D:
         for point in self.verified_points():
             grouped.setdefault(point.status or "unknown", []).append(point.coordinate)
         return {
+            "model_version": self.model_version,
+            "model_hash": self.base_problem.canonical_hash(),
+            "change_type": self.change_type,
             "verified": grouped,
             "unresolved": [
                 coordinate
@@ -246,6 +334,27 @@ class ParameterStudy2D:
                 "points is claimed unless a region conclusion explicitly covers it"
             ),
         }
+
+    def _requested_coordinates(
+        self,
+        x_range: Sequence[int] | None,
+        y_range: Sequence[int] | None,
+        coordinates: Sequence[Sequence[int]] | None,
+    ) -> tuple[Coordinate, ...]:
+        if coordinates is not None:
+            if x_range is not None or y_range is not None:
+                raise ValueError("use either ranges or coordinates, not both")
+            selected = sorted({(int(pair[0]), int(pair[1])) for pair in coordinates})
+            if not selected:
+                raise ValueError("a region must contain at least one lattice point")
+            return tuple(selected)
+        if x_range is None or y_range is None:
+            raise ValueError("both x_range and y_range are required")
+        x_min, x_max = int(x_range[0]), int(x_range[1])
+        y_min, y_max = int(y_range[0]), int(y_range[1])
+        if x_min > x_max or y_min > y_max:
+            raise ValueError("region ranges must be ordered (min, max)")
+        return tuple((x, y) for x in range(x_min, x_max + 1) for y in range(y_min, y_max + 1))
 
     def run(self, max_points: int | None = None, budget: SearchBudget | None = None) -> None:
         budget = budget or self.budget
@@ -263,16 +372,36 @@ class ParameterStudy2D:
             completed += 1
             self._save()
 
+    def run_region(
+        self,
+        coordinates: Sequence[Sequence[int]],
+        max_points: int | None = None,
+        budget: SearchBudget | None = None,
+    ) -> None:
+        target = set(self._requested_coordinates(None, None, coordinates))
+        original_pending = self._pending
+        target_pending = [coordinate for coordinate in original_pending if coordinate in target]
+        if not target_pending:
+            return
+        untouched = [coordinate for coordinate in original_pending if coordinate not in target]
+        self._pending = target_pending
+        try:
+            self.run(max_points=max_points, budget=budget)
+        finally:
+            self._pending = sorted(set(untouched + self._pending))
+            self._save()
+
     def request_region_conclusion(
         self,
-        x_range: Sequence[int],
-        y_range: Sequence[int],
+        x_range: Sequence[int] | None,
+        y_range: Sequence[int] | None,
         status: str | None = None,
+        coordinates: Sequence[Sequence[int]] | None = None,
     ) -> RegionReport:
-        x_min, x_max = int(x_range[0]), int(x_range[1])
-        y_min, y_max = int(y_range[0]), int(y_range[1])
-        if x_min > x_max or y_min > y_max:
-            raise ValueError("region ranges must be ordered (min, max)")
+        selected = self._requested_coordinates(x_range, y_range, coordinates)
+        xs = [x for x, _ in selected]
+        ys = [y for _, y in selected]
+        x_min, x_max, y_min, y_max = min(xs), max(xs), min(ys), max(ys)
         if status is not None and status not in {item.value for item in ResultStatus}:
             raise ValueError(f"unknown result status {status!r}")
 
@@ -280,16 +409,15 @@ class ParameterStudy2D:
         mismatched: list[tuple[Coordinate, str]] = []
         statuses: dict[Coordinate, str] = {}
         depends_on: list[Coordinate] = []
-        for x in range(x_min, x_max + 1):
-            for y in range(y_min, y_max + 1):
-                point = self._points.get((x, y))
-                if point is None or not point.verified or point.status is None:
-                    missing.append((x, y))
-                    continue
-                statuses[(x, y)] = point.status
-                depends_on.append((x, y))
-                if status is not None and point.status != status:
-                    mismatched.append(((x, y), point.status))
+        for coordinate in selected:
+            point = self._points.get(coordinate)
+            if point is None or not point.verified or point.status is None:
+                missing.append(coordinate)
+                continue
+            statuses[coordinate] = point.status
+            depends_on.append(coordinate)
+            if status is not None and point.status != status:
+                mismatched.append((coordinate, point.status))
 
         distinct = set(statuses.values())
         unanimous = len(distinct) == 1 and (status is None or distinct == {status})
@@ -297,7 +425,15 @@ class ParameterStudy2D:
         conclusion = None
         if verified:
             conclusion = RegionConclusion(
-                x_min, x_max, y_min, y_max, next(iter(distinct)), tuple(sorted(depends_on))
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                next(iter(distinct)),
+                tuple(sorted(depends_on)),
+                selected,
+                self.base_problem.canonical_hash(),
+                self.model_version,
             )
             if conclusion not in self._regions:
                 self._regions.append(conclusion)
@@ -318,6 +454,131 @@ class ParameterStudy2D:
     def conflicts(self) -> list[dict]:
         return region_conflicts(self._regions)
 
+    def derive_branch(
+        self,
+        new_problem: Problem,
+        values_x: Sequence[int],
+        values_y: Sequence[int],
+        directory: str | Path,
+        change_type: str,
+        model_version: str,
+        budget: SearchBudget | None = None,
+    ) -> "ParameterStudy2D":
+        if change_type not in ModelChange.ALL:
+            raise ValueError(f"unknown model change type {change_type!r}")
+        same_problem = new_problem.canonical_hash() == self.base_problem.canonical_hash()
+        if change_type == ModelChange.PARAMETER_RANGE and not same_problem:
+            raise ValueError("parameter range changes must use the same base problem")
+        if change_type != ModelChange.PARAMETER_RANGE and same_problem:
+            raise ValueError(f"{change_type!r} requires a changed base problem")
+        self._validate_model_change(new_problem, change_type)
+        return ParameterStudy2D(
+            directory,
+            new_problem,
+            self.axis_x,
+            values_x,
+            self.axis_y,
+            values_y,
+            budget or self.budget,
+            model_version=model_version,
+            parent_directory=self.directory,
+            change_type=change_type,
+        )
+
+    def _validate_model_change(self, new_problem: Problem, change_type: str) -> None:
+        if change_type == ModelChange.OBJECTIVE_CHANGED:
+            if new_problem.variables != self.base_problem.variables:
+                raise ValueError("objective changes cannot alter variables")
+            if new_problem.constraints != self.base_problem.constraints:
+                raise ValueError("objective changes cannot alter constraints")
+            return
+        if new_problem.objective != self.base_problem.objective:
+            raise ValueError(f"{change_type!r} cannot change the objective")
+        if new_problem.variables != self.base_problem.variables:
+            raise ValueError(f"{change_type!r} variable-domain changes are not inferred")
+        old_constraints = {item.name: item for item in self.base_problem.constraints}
+        new_constraints = {item.name: item for item in new_problem.constraints}
+        if change_type == ModelChange.CONSTRAINT_TIGHTENED:
+            if not set(old_constraints).issubset(new_constraints):
+                raise ValueError("constraint tightening cannot remove existing constraints")
+            for name, old in old_constraints.items():
+                new = new_constraints[name]
+                if new.coefficients != old.coefficients or new.rhs > old.rhs:
+                    raise ValueError(f"constraint {name!r} is not a monotone tightening")
+        if change_type == ModelChange.CONSTRAINT_RELAXED:
+            if not set(new_constraints).issubset(old_constraints):
+                raise ValueError("constraint relaxation cannot add new constraints")
+            for name, new in new_constraints.items():
+                old = old_constraints[name]
+                if new.coefficients != old.coefficients or new.rhs < old.rhs:
+                    raise ValueError(f"constraint {name!r} is not a monotone relaxation")
+
+    def request_reused_region_conclusion(
+        self,
+        coordinates: Sequence[Sequence[int]],
+        status: str | None = None,
+    ) -> RegionReport:
+        if self.parent_directory is None or self.change_type is None:
+            raise ValueError("this study has no parent model to reuse conclusions from")
+        selected = self._requested_coordinates(None, None, coordinates)
+        xs = [x for x, _ in selected]
+        ys = [y for _, y in selected]
+        bounds = min(xs), max(xs), min(ys), max(ys)
+        parent_manifest = Path(self.parent_directory) / "study.json"
+        with parent_manifest.open("r", encoding="utf-8") as handle:
+            parent_data = json.load(handle)
+        if ParameterAxis.from_dict(parent_data["axis_x"]) != self.axis_x or ParameterAxis.from_dict(parent_data["axis_y"]) != self.axis_y:
+            raise ValueError("parent and branch use different parameter axes")
+        wanted = set(selected)
+        source = next(
+            (
+                RegionConclusion.from_dict(item)
+                for item in parent_data.get("regions", [])
+                if RegionConclusion.from_dict(item).coordinate_set() == wanted
+            ),
+            None,
+        )
+        if source is None:
+            return RegionReport(*bounds, False, None, tuple(selected), (), {}, None, False)
+        if status is not None and source.status != status:
+            return RegionReport(*bounds, False, None, (), (), {}, None, False)
+        if source.status not in REUSED_STATUSES[self.change_type]:
+            raise ValueError(
+                f"parent status {source.status!r} is not transferable under {self.change_type!r}"
+            )
+        parent_problem = Problem.from_dict(parent_data["base_problem"])
+        reused_from = {
+            "study": self.parent_directory,
+            "model_version": parent_data.get("model_version", "current"),
+            "model_hash": parent_problem.canonical_hash(),
+            "status": source.status,
+            "coordinates": [list(coordinate) for coordinate in source.coordinates],
+            "depends_on": [list(coordinate) for coordinate in source.depends_on],
+            "change_type": self.change_type,
+        }
+        conclusion = RegionConclusion(
+            *bounds,
+            source.status,
+            source.depends_on,
+            selected,
+            self.base_problem.canonical_hash(),
+            self.model_version,
+            reused_from,
+        )
+        if conclusion not in self._regions:
+            self._regions.append(conclusion)
+            self._save()
+        return RegionReport(
+            *bounds,
+            True,
+            source.status,
+            (),
+            (),
+            {coordinate: source.status for coordinate in selected},
+            conclusion,
+            True,
+        )
+
     def review_saved(self) -> dict:
         errors: list[str] = []
         for coordinate, point in sorted(self._points.items()):
@@ -327,6 +588,12 @@ class ParameterStudy2D:
             if not report.valid:
                 errors.extend(f"point {coordinate}: {error}" for error in report.errors)
         for region in self._regions:
+            if region.model_hash != self.base_problem.canonical_hash():
+                errors.append(f"region {region.coordinates} belongs to a different model hash")
+                continue
+            if region.reused_from is not None:
+                self._review_reused_region(region, errors)
+                continue
             for coordinate in region.depends_on:
                 point = self._points.get(coordinate)
                 if point is None or not point.verified:
@@ -339,6 +606,54 @@ class ParameterStudy2D:
                         f"whose status {point.status!r} no longer matches"
                     )
         return {"valid": not errors, "errors": errors}
+
+    def _review_reused_region(self, region: RegionConclusion, errors: list[str]) -> None:
+        source = region.reused_from or {}
+        try:
+            parent_directory = Path(source["study"])
+            with (parent_directory / "study.json").open("r", encoding="utf-8") as handle:
+                parent_data = json.load(handle)
+            parent_problem = Problem.from_dict(parent_data["base_problem"])
+            if source.get("model_hash") != parent_problem.canonical_hash():
+                errors.append(f"reused region {region.coordinates} source model hash changed")
+            source_region = next(
+                (
+                    RegionConclusion.from_dict(item)
+                    for item in parent_data.get("regions", [])
+                    if RegionConclusion.from_dict(item).coordinate_set() == region.coordinate_set()
+                ),
+                None,
+            )
+            if source_region is None:
+                errors.append(f"reused region {region.coordinates} has no matching parent region")
+                return
+            if source_region.status != region.status or source.get("status") != region.status:
+                errors.append(f"reused region {region.coordinates} status no longer matches parent")
+            if source_region.depends_on != region.depends_on:
+                errors.append(f"reused region {region.coordinates} evidence changed")
+            if source.get("change_type") != self.change_type:
+                errors.append(f"reused region {region.coordinates} change metadata changed")
+            if region.status not in REUSED_STATUSES.get(self.change_type or "", set()):
+                errors.append(
+                    f"status {region.status!r} is not reusable under {self.change_type!r}"
+                )
+            parent = ParameterStudy2D(
+                parent_directory,
+                parent_problem,
+                ParameterAxis.from_dict(parent_data["axis_x"]),
+                [],
+                ParameterAxis.from_dict(parent_data["axis_y"]),
+                [],
+                model_version=parent_data.get("model_version", "current"),
+                parent_directory=parent_data.get("parent_directory"),
+                change_type=parent_data.get("change_type"),
+            )
+            parent_review = parent.review_saved()
+            errors.extend(
+                f"reused region parent: {error}" for error in parent_review["errors"]
+            )
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"reused region {region.coordinates} cannot be reviewed: {exc}")
 
     def derive(
         self,
@@ -411,4 +726,3 @@ class ParameterStudy2D:
                     best_distance = distance
                     best_assignment = result.best_assignment
         return best_assignment
-

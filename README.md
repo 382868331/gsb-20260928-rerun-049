@@ -100,7 +100,7 @@ study.summary()
 
 ### 区域结论
 
-`request_region_conclusion(x范围, y范围, status=None)` 申请对一个闭矩形区域给出整体结论。只有区域内**每个**整数格点都已逐一核实、且结论一致（或与申请的 `status` 相符）时才记录为区域结论；否则返回未核实报告，列出缺失位置 `missing` 和结论不符位置 `mismatched`，离散点记录保持不变。四个角点结论相同不足以推出内部；边界上刚好退化的情形（如可行域退化为一条线）只能用覆盖该线的窄区域单独申请，不会被并进旁边的块。
+`request_region_conclusion(x范围, y范围, status=None)` 申请对一个闭矩形区域给出整体结论；也可以传入 `coordinates=[(x, y), ...]` 选择任意非矩形整数格点子区域。只有所选区域内**每个**整数格点都已逐一核实、且结论一致（或与申请的 `status` 相符）时才记录为区域结论；否则返回未核实报告，列出缺失位置 `missing` 和结论不符位置 `mismatched`，离散点记录保持不变。四个角点结论相同不足以推出内部；边界退化时可把一条线表示为坐标列表，把点表示为单元素列表。非矩形区域只覆盖列出的坐标，不覆盖其外接矩形内的空洞。
 
 ```python
 report = study.request_region_conclusion((-1, 0), (2, 3), status="optimal")
@@ -108,9 +108,26 @@ if report.verified:
     report.conclusion.depends_on  # 该区域结论依赖的全部已核实点
 ```
 
-- 区域结论记录其依赖的每一个已核实点（`depends_on`），保存重开后 `review_saved()` 会重新核对每个点的证明以及区域依赖是否仍然成立。
-- 区域可以相交；结论互相矛盾的相交区域不会被后来结果覆盖，`conflicts()` 会指出冲突的重叠范围和双方各自依赖的证据点。
+只续算一个非矩形子区域时使用 `run_region(coordinates, max_points=None, budget=None)`。列表外的待算格点仍保留在 `pending`，不会被自动补齐；预算中断时正在计算的点也继续留在清单首位。
+
+- 区域结论记录其依赖的每一个已核实点（`depends_on`）、覆盖的精确坐标（`coordinates`）、模型版本（`model_version`）和模型指纹（`model_hash`）。保存重开后 `review_saved()` 会重新核对每个点的证明以及区域依赖是否仍然成立。
+- 区域可以相交；同模型版本中结论互相矛盾的相交区域不会被后来结果覆盖，`conflicts()` 会指出共享格点和双方各自依赖的证据点。不同模型版本不会被混为一个结论。
 - `derive(x, y, 新轴, 新取值, 新目录)` 从一个已核实位置派生一维 `ParameterSweep`，原研究记录保持可查；从未核实的位置派生会被拒绝。
+
+### 模型分支与复用
+
+`derive_branch(新问题, 新x取值, 新y取值, 新目录, change_type, model_version)` 从已完成的二维研究派生新模型分支。分支有独立目录和模型版本；父研究的区域不会变成新版本的逐点结果。
+
+`request_reused_region_conclusion(coordinates, status=None)` 只在父研究存在**覆盖坐标完全相同**的区域结论，且变化类型允许状态传递时，才在分支中记录一条复用结论。复用结论通过 `reused_from` 记录父目录、父模型版本、父模型指纹、区域、证据点和变化类型；这些坐标在分支中仍可保留为待检查点，不会伪装成已经在新版本重新求解。
+
+| 变化类型 | 可安全传递的结论 | 必须重新求解 |
+| --- | --- | --- |
+| `ModelChange.PARAMETER_RANGE` | 相同参数坐标上的 `optimal`、`infeasible`、`unbounded` | 新加入范围 |
+| `ModelChange.CONSTRAINT_TIGHTENED` | 旧模型已 `infeasible` | 旧模型 `optimal`、`unbounded` 或新约束交叉处 |
+| `ModelChange.CONSTRAINT_RELAXED` | 旧模型已 `unbounded` | 旧模型 `optimal`、`infeasible` |
+| `ModelChange.OBJECTIVE_CHANGED` | 旧模型已 `infeasible` | 任何旧可行点的最优值或无界性 |
+
+例如父模型有两个独立上界 `x <= a`、`y <= b`，最大化 `x+y` 时内点 `(a,b)=(2,2)` 的最优值是 4；分支加入交叉约束 `x+y <= 2` 后，角点参数仍可能保持旧结果，但 `(2,2)` 的最优值变为 2。该区域不能从父模型复用，必须逐点重新求解。`tests/test_grid.py` 中的 `test_crossing_constraint_changes_interior_optimum_and_requires_resolve` 同时展示了这种区别和上述四类传递规则。
 
 ## 快速开始
 
