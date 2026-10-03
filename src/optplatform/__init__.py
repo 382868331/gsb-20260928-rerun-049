@@ -1,3 +1,11 @@
+from .grid import (
+    GridPoint,
+    GridReviewReport,
+    ParameterGrid,
+    RegionClaim,
+    RegionConflict,
+    find_conflicts,
+)
 from .model import Constraint, ObjectiveSense, Problem, Variable
 from .proof import VerificationReport, review_proof, verify_proof
 from .search import BranchAndBound, BranchingStrategy, SearchBudget, SearchState, WidestDomain
@@ -9,10 +17,15 @@ __all__ = [
     "BranchAndBound",
     "BranchingStrategy",
     "Constraint",
+    "GridPoint",
+    "GridReviewReport",
     "ObjectiveSense",
     "ParameterAxis",
+    "ParameterGrid",
     "ParameterSweep",
     "Problem",
+    "RegionClaim",
+    "RegionConflict",
     "ResultStatus",
     "SearchBudget",
     "SearchState",
@@ -23,6 +36,7 @@ __all__ = [
     "VerificationReport",
     "Variable",
     "WidestDomain",
+    "find_conflicts",
     "problem_at",
     "verify_proof",
     "review_proof",

@@ -68,7 +68,42 @@ sweep.summary()
 - `run(max_points=k)` 可暂停，重新构造 `ParameterSweep` 会从 `sweep.json` 清单恢复进度；清单与基准问题或参数轴不匹配会报错。
 - `sweep.derive(已核实值, 新轴, 新取值, 新目录)` 从一个已核实点派生另一组参数变化，原扫描记录保持可查。
 
+## 双参数扫描
+
+`ParameterGrid` 在两条参数轴（目标系数或约束边界）构成的整数平面上逐格求解。每个已检查位置在 `points/<u>_<v>/` 下独立保存原问题、搜索状态、结果和证明；`summary()` 只列出逐一核实的离散 `(u, v)` 位置，不会把相邻同色位置连成块来暗示块内都已证明。
+
+```python
+from optplatform import Constraint, ParameterAxis, ParameterGrid, Problem, Variable
+
+problem = Problem(
+    "band",
+    [Variable("x", 0, 10)],
+    {"x": 1},
+    [Constraint("hi", {"x": 1}, 0), Constraint("lo", {"x": -1}, 0)],
+)
+grid = ParameterGrid(
+    "runs/band-grid",
+    problem,
+    ParameterAxis(ParameterAxis.CONSTRAINT_RHS, "hi"),
+    ParameterAxis(ParameterAxis.CONSTRAINT_RHS, "lo"),
+    [0, 1, 2, 3],
+    [-2],
+)
+grid.run()
+grid.summary()
+# {'verified': {'infeasible': [[0, -2], [1, -2]], 'optimal': [[2, -2], [3, -2]]}, ...}
+```
+
+- `add_checkpoints(cells)` 在结论变化附近追加位置；已核实位置不会重求。
+- `add_budget(budget)` 把预算耗尽或未能证书化的位置重新排队，用新预算继续；旧证明只有在其位置、参数轴和基准问题仍匹配时才被复核接受。
+- `request_region(u_min, u_max, v_min, v_max, status)` 申请矩形区域结论：只有区域内每个整数位置都逐一核实且结论一致时才保存为区域结论，并记录所依赖的全部位置；否则返回未通过的申请和尚未排除的位置清单，不留下任何区域记录。四个角点结论相同不代表内部相同——内部位置未逐一核实前申请会被拒绝。
+- 区域退化成线或点（某一边界相等）是合法结论，记录中以 `degenerate` 标出，与内部区域分开表达；边界上刚好退化（如目标系数为零）的位置保持未确定，不会被并入相邻区域结论。
+- `conflicts()` / `summary()["conflicts"]` 检查已保存区域结论：相交且结论矛盾时报告重叠范围和双方各自依赖的位置，不会用后来的结果覆盖先前的记录。
+- `grid.derive(已核实位置, 新轴u, 新轴v, 新取值u, 新取值v, 新目录)` 从一个已核实位置派生另一组双参数范围，原网格记录保持可查。
+- 重新构造 `ParameterGrid` 会从 `grid.json` 清单恢复进度；`review_saved()` 重新核对每个位置的问题指纹、保存的证明，以及每条区域结论依赖的位置是否仍然核实，任何不匹配都会逐项报告。
+
 ## 快速开始
+
 
 ```python
 from optplatform import BranchAndBound, Constraint, Problem, Variable
