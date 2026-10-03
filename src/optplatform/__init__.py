@@ -1,4 +1,12 @@
 from .model import Constraint, ObjectiveSense, Problem, Variable
+from .grid import (
+    GridPoint,
+    ParameterStudy2D,
+    RegionConclusion,
+    RegionReport,
+    region_conflicts,
+    region_overlap,
+)
 from .proof import VerificationReport, review_proof, verify_proof
 from .search import BranchAndBound, BranchingStrategy, SearchBudget, SearchState, WidestDomain
 from .store import SearchStore
@@ -9,10 +17,14 @@ __all__ = [
     "BranchAndBound",
     "BranchingStrategy",
     "Constraint",
+    "GridPoint",
     "ObjectiveSense",
     "ParameterAxis",
+    "ParameterStudy2D",
     "ParameterSweep",
     "Problem",
+    "RegionConclusion",
+    "RegionReport",
     "ResultStatus",
     "SearchBudget",
     "SearchState",
@@ -24,6 +36,8 @@ __all__ = [
     "Variable",
     "WidestDomain",
     "problem_at",
+    "region_conflicts",
+    "region_overlap",
     "verify_proof",
     "review_proof",
 ]

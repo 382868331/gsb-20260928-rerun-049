@@ -68,6 +68,50 @@ sweep.summary()
 - `run(max_points=k)` 可暂停，重新构造 `ParameterSweep` 会从 `sweep.json` 清单恢复进度；清单与基准问题或参数轴不匹配会报错。
 - `sweep.derive(已核实值, 新轴, 新取值, 新目录)` 从一个已核实点派生另一组参数变化，原扫描记录保持可查。
 
+## 二维参数研究
+
+`ParameterStudy2D` 同时沿两个参数轴（目标系数或约束边界）变化，在平面的整数格点上逐点求解。每个已检查位置在 `points/<x>__<y>/` 下独立保存问题、搜索状态、结果和证明；只有当前参数组合重新求解并复核通过才标记为 `verified`。
+
+```python
+from optplatform import Constraint, ParameterAxis, ParameterStudy2D, Problem, Variable
+
+problem = Problem(
+    "band",
+    [Variable("x", 0, 6)],
+    {"x": 1},
+    [Constraint("floor", {"x": -1}, 0), Constraint("cap", {"x": 1}, 6)],
+)
+study = ParameterStudy2D(
+    "runs/band-2d",
+    problem,
+    ParameterAxis(ParameterAxis.CONSTRAINT_RHS, "floor"),
+    [-1, 0],
+    ParameterAxis(ParameterAxis.CONSTRAINT_RHS, "cap"),
+    [1, 2, 3],
+)
+study.run()
+study.summary()
+# verified 只列出逐一核实的离散点；不暗示点与点之间或周边区域已证明
+```
+
+- `summary()` 按结论分组列出离散已核实点、未解决点和待算点，并明确不声称任何二维区域结论；显示时不能把相邻同色点连成块来暗示块内都已证明。
+- `add_checkpoints([(x, y), ...])` 在结论变化附近追加检查位置；已核实的点不会重求。
+- `run(max_points=k)` 可暂停；预算耗尽或取消时该位置保持未核实并留在 `pending`，重新构造 `ParameterStudy2D` 会从 `study.json` 清单恢复后继续。
+
+### 区域结论
+
+`request_region_conclusion(x范围, y范围, status=None)` 申请对一个闭矩形区域给出整体结论。只有区域内**每个**整数格点都已逐一核实、且结论一致（或与申请的 `status` 相符）时才记录为区域结论；否则返回未核实报告，列出缺失位置 `missing` 和结论不符位置 `mismatched`，离散点记录保持不变。四个角点结论相同不足以推出内部；边界上刚好退化的情形（如可行域退化为一条线）只能用覆盖该线的窄区域单独申请，不会被并进旁边的块。
+
+```python
+report = study.request_region_conclusion((-1, 0), (2, 3), status="optimal")
+if report.verified:
+    report.conclusion.depends_on  # 该区域结论依赖的全部已核实点
+```
+
+- 区域结论记录其依赖的每一个已核实点（`depends_on`），保存重开后 `review_saved()` 会重新核对每个点的证明以及区域依赖是否仍然成立。
+- 区域可以相交；结论互相矛盾的相交区域不会被后来结果覆盖，`conflicts()` 会指出冲突的重叠范围和双方各自依赖的证据点。
+- `derive(x, y, 新轴, 新取值, 新目录)` 从一个已核实位置派生一维 `ParameterSweep`，原研究记录保持可查；从未核实的位置派生会被拒绝。
+
 ## 快速开始
 
 ```python
