@@ -73,9 +73,20 @@ class RegionConclusion:
     y_max: int
     status: str
     depends_on: tuple[Coordinate, ...]
+    coordinates: tuple[Coordinate, ...] | None = None
+    model_version: str = ""
+
+    def __post_init__(self) -> None:
+        if self.coordinates is None:
+            coordinates = tuple(
+                (x, y)
+                for x in range(self.x_min, self.x_max + 1)
+                for y in range(self.y_min, self.y_max + 1)
+            )
+            object.__setattr__(self, "coordinates", coordinates)
 
     def contains(self, x: int, y: int) -> bool:
-        return self.x_min <= x <= self.x_max and self.y_min <= y <= self.y_max
+        return (int(x), int(y)) in (self.coordinates or ())
 
     def to_dict(self) -> dict:
         return {
@@ -85,17 +96,34 @@ class RegionConclusion:
             "y_max": self.y_max,
             "status": self.status,
             "depends_on": [list(coordinate) for coordinate in self.depends_on],
+            "coordinates": [list(coordinate) for coordinate in (self.coordinates or ())],
+            "model_version": self.model_version,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping) -> "RegionConclusion":
+        x_min = int(data["x_min"])
+        x_max = int(data["x_max"])
+        y_min = int(data["y_min"])
+        y_max = int(data["y_max"])
+        raw_coordinates = data.get("coordinates")
+        if raw_coordinates is None:
+            coordinates = tuple(
+                (x, y)
+                for x in range(x_min, x_max + 1)
+                for y in range(y_min, y_max + 1)
+            )
+        else:
+            coordinates = tuple((int(pair[0]), int(pair[1])) for pair in raw_coordinates)
         return cls(
-            int(data["x_min"]),
-            int(data["x_max"]),
-            int(data["y_min"]),
-            int(data["y_max"]),
+            x_min,
+            x_max,
+            y_min,
+            y_max,
             data["status"],
             tuple((int(pair[0]), int(pair[1])) for pair in data.get("depends_on", [])),
+            coordinates,
+            data.get("model_version", ""),
         )
 
 
@@ -129,13 +157,19 @@ def region_conflicts(regions: Sequence[RegionConclusion]) -> list[dict]:
         for second in regions[index + 1 :]:
             if first.status == second.status:
                 continue
-            overlap = region_overlap(first, second)
-            if overlap is None:
+            shared = sorted(set(first.coordinates or ()) & set(second.coordinates or ()))
+            if not shared:
                 continue
-            x_min, x_max, y_min, y_max = overlap
+            x_values = [x for x, _ in shared]
+            y_values = [y for _, y in shared]
             conflicts.append(
                 {
-                    "overlap": {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max},
+                    "overlap": {
+                        "x_min": min(x_values),
+                        "x_max": max(x_values),
+                        "y_min": min(y_values),
+                        "y_max": max(y_values),
+                    },
                     "first": {"status": first.status, "evidence": sorted(first.depends_on)},
                     "second": {"status": second.status, "evidence": sorted(second.depends_on)},
                 }
@@ -191,7 +225,13 @@ class ParameterStudy2D:
         self._pending = sorted(
             (int(pair[0]), int(pair[1])) for pair in data.get("pending", [])
         )
-        self._regions = [RegionConclusion.from_dict(item) for item in data.get("regions", [])]
+        model_version = saved_problem.canonical_hash()
+        self._regions = []
+        for item in data.get("regions", []):
+            region = RegionConclusion.from_dict(item)
+            if not region.model_version:
+                object.__setattr__(region, "model_version", model_version)
+            self._regions.append(region)
         self._reuse = [ReuseDecision.from_dict(item) for item in data.get("reuse", [])]
         self._derived_from = data.get("derived_from")
 
@@ -307,7 +347,14 @@ class ParameterStudy2D:
         conclusion = None
         if verified:
             conclusion = RegionConclusion(
-                x_min, x_max, y_min, y_max, next(iter(distinct)), tuple(sorted(depends_on))
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                next(iter(distinct)),
+                tuple(sorted(depends_on)),
+                tuple(sorted(depends_on)),
+                self.base_problem.canonical_hash(),
             )
             if conclusion not in self._regions:
                 self._regions.append(conclusion)
@@ -337,7 +384,35 @@ class ParameterStudy2D:
             if not report.valid:
                 errors.extend(f"point {coordinate}: {error}" for error in report.errors)
         for region in self._regions:
-            for coordinate in region.depends_on:
+            coordinates = tuple(sorted(region.coordinates or ()))
+            if not coordinates:
+                errors.append(f"region {region.to_dict()} does not contain any coordinates")
+                continue
+            bounds = (
+                min(x for x, _ in coordinates),
+                max(x for x, _ in coordinates),
+                min(y for _, y in coordinates),
+                max(y for _, y in coordinates),
+            )
+            if (
+                region.x_min,
+                region.x_max,
+                region.y_min,
+                region.y_max,
+            ) != bounds:
+                errors.append(
+                    f"region {region.to_dict()} has bounds that do not match its exact coordinates"
+                )
+            if tuple(sorted(region.depends_on)) != coordinates:
+                errors.append(
+                    f"region {region.to_dict()} must depend on exactly its recorded coordinates"
+                )
+            if region.model_version != self.base_problem.canonical_hash():
+                errors.append(
+                    f"region {region.to_dict()} belongs to model version {region.model_version!r}, "
+                    f"not the current model {self.base_problem.canonical_hash()!r}"
+                )
+            for coordinate in coordinates:
                 point = self._points.get(coordinate)
                 if point is None or not point.verified:
                     errors.append(
@@ -348,6 +423,17 @@ class ParameterStudy2D:
                         f"region {region.to_dict()} depends on point {coordinate} "
                         f"whose status {point.status!r} no longer matches"
                     )
+                else:
+                    effective_problem = problem_at(
+                        problem_at(self.base_problem, self.axis_x, coordinate[0]),
+                        self.axis_y,
+                        coordinate[1],
+                    )
+                    if point.problem_hash != effective_problem.canonical_hash():
+                        errors.append(
+                            f"region {region.to_dict()} depends on point {coordinate} "
+                            "from a different model version"
+                        )
         errors.extend(review_reuse_decisions(self))
         return {"valid": not errors, "errors": errors}
 
@@ -492,6 +578,21 @@ class ParameterStudy2D:
             and len(distinct) == 1
             and (status is None or distinct == {status})
         )
+        conclusion = None
+        if verified:
+            conclusion = RegionConclusion(
+                min(x for x, _ in cells),
+                max(x for x, _ in cells),
+                min(y for _, y in cells),
+                max(y for _, y in cells),
+                next(iter(distinct)),
+                tuple(cells),
+                tuple(cells),
+                self.base_problem.canonical_hash(),
+            )
+            if conclusion not in self._regions:
+                self._regions.append(conclusion)
+                self._save()
         return {
             "coordinates": cells,
             "verified": verified,
@@ -499,6 +600,9 @@ class ParameterStudy2D:
             "missing": missing,
             "mismatched": mismatched,
             "statuses": statuses,
+            "depends_on": tuple(cells) if verified else tuple(sorted(statuses)),
+            "model_version": self.base_problem.canonical_hash(),
+            "conclusion": conclusion,
         }
 
     def derive(

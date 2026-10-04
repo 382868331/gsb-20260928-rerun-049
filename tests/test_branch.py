@@ -161,6 +161,62 @@ class BranchTestCase(unittest.TestCase):
         coverage = self.study.request_coverage([(2, 2), (9, 9)])
         self.assertEqual(coverage["missing"], [(9, 9)])
 
+    def test_coverage_reports_are_saved_as_exact_coordinate_regions(self):
+        study = ParameterStudy2D(
+            self.root / "cap-five",
+            make_base(5),
+            AXIS_X,
+            [1, 2],
+            AXIS_Y,
+            [2, 3],
+        )
+        study.add_checkpoints([(3, 2)])
+        study.run()
+        five_points = [(1, 2), (1, 3), (2, 2), (2, 3), (3, 2)]
+        five_point_report = study.request_coverage(five_points, status="optimal")
+        line_report = study.request_coverage([(1, 3), (2, 3)], status="optimal")
+        point_report = study.request_coverage([(1, 2)], status="optimal")
+
+        self.assertTrue(five_point_report["verified"])
+        self.assertTrue(line_report["verified"])
+        self.assertTrue(point_report["verified"])
+        self.assertEqual(five_point_report["coordinates"], five_points)
+        self.assertEqual(five_point_report["depends_on"], tuple(five_points))
+        self.assertEqual(
+            five_point_report["model_version"], make_base(5).canonical_hash()
+        )
+        self.assertEqual(len(study.regions()), 3)
+
+        rectangle_with_hole = study.request_region_conclusion((1, 3), (3, 3))
+        self.assertFalse(rectangle_with_hole.verified)
+        self.assertEqual(rectangle_with_hole.missing, ((3, 3),))
+        self.assertEqual(len(study.regions()), 3)
+
+        reopened = ParameterStudy2D(
+            self.root / "cap-five",
+            make_base(5),
+            AXIS_X,
+            [1, 2],
+            AXIS_Y,
+            [2, 3],
+        )
+        self.assertEqual(len(reopened.regions()), 3)
+        five_point_region = reopened.regions()[0]
+        self.assertEqual(five_point_region.coordinates, tuple(five_points))
+        self.assertEqual(five_point_region.depends_on, tuple(five_points))
+        self.assertEqual(five_point_region.model_version, make_base(5).canonical_hash())
+        self.assertFalse(five_point_region.contains(3, 3))
+        self.assertTrue(reopened.review_saved()["valid"])
+
+        reopened.add_checkpoints([(3, 3)])
+        reopened.run()
+        self.assertTrue(reopened.review_saved()["valid"])
+        self.assertEqual(len(reopened.regions()), 3)
+        self.assertFalse(reopened.regions()[0].contains(3, 3))
+        filled_rectangle = reopened.request_region_conclusion((1, 3), (3, 3))
+        self.assertTrue(filled_rectangle.verified)
+        self.assertEqual(len(reopened.regions()), 4)
+
     def test_reopen_preserves_reuse_regions_and_holes(self):
         branch = self.derive(make_base(1))
         report = branch.request_region_conclusion((0, 0), (2, 3), status="infeasible")
