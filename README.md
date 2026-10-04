@@ -112,6 +112,30 @@ if report.verified:
 - 区域可以相交；结论互相矛盾的相交区域不会被后来结果覆盖，`conflicts()` 会指出冲突的重叠范围和双方各自依赖的证据点。
 - `derive(x, y, 新轴, 新取值, 新目录)` 从一个已核实位置派生一维 `ParameterSweep`，原研究记录保持可查；从未核实的位置派生会被拒绝。
 
+### 模型分支与复用
+
+新测量调整约束后，`derive_branch(新基准问题, 新目录, values_x=..., values_y=..., subregion=...)` 从已完成的区域研究派生新模型分支。分支对每个目标坐标逐一比较旧、新有效问题并分类变化，只复用该变化规则下仍然成立的结论：
+
+- `identical`：有效问题完全一致，全部终态结论可复用。
+- `constraint_tightened`：约束收紧（系数不变、右端变小），只复用 `infeasible`；旧最优解可能已被切掉，必须重新求解。
+- `constraint_relaxed`：约束放宽，任何结论都不可复用（旧不可行可能变可行，旧最优可能被超越）。
+- `objective_changed`：可行域不变，只复用 `infeasible`；最优性必须重新证明。
+- `constraint_changed` / `model_changed`：约束系数或变量结构变化，不可复用。
+
+```python
+branch = study.derive_branch(new_base_problem, "runs/band-v2")
+branch.reuse_summary()
+# reused: 按结论分组的复用坐标；requires_resolve: 有旧结果但不可复用；
+# new_coordinates: 参数范围变化带来的新坐标；pending: 待算空洞
+```
+
+- 每条复用决策记录适用的模型版本（新基准指纹）、来源版本、坐标、结论与规则，写入 `study.json`；`review_saved()` 会重新加载来源研究并独立重算分类，篡改复用记录会被判为无效。
+- 复用是逐点判定的：即使新区域四个角点都有可复用的旧结果，内部未核实的点仍会让 `request_region_conclusion` 返回缺失报告，不会把整个区域标成已验证。跨版本记录中不可行、最优与待检查分别成组，互不混用。
+- `subregion=[(x, y), ...]` 允许只沿一个非矩形子区域继续计算；`request_coverage(坐标集合)` 对任意形状（含退化成线或点的集合）给出逐点覆盖情况。
+- 预算中断后保存重开：复用结论、已核实区域和待检查空洞都持久化在清单里，重开不会丢失已核对区域，也不会自动补齐空洞。
+
+约束交叉导致内部最优解变化的完整示例见 `examples/constraint_crossing.py`。
+
 ## 快速开始
 
 ```python

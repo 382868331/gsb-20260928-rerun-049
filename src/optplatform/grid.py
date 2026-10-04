@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 from .model import Problem
 from .search import BranchAndBound, SearchBudget
 from .store import SearchStore
+from .branch import ReuseDecision, classify_problem_change, review_reuse_decisions
 from .sweep import (
     BUDGET_STOP_REASONS,
     TERMINAL_STATUSES,
@@ -165,6 +166,8 @@ class ParameterStudy2D:
         self._points: dict[Coordinate, GridPoint] = {}
         self._pending: list[Coordinate] = []
         self._regions: list[RegionConclusion] = []
+        self._reuse: list[ReuseDecision] = []
+        self._derived_from: str | None = None
         if self.manifest_path.exists():
             self._load()
         else:
@@ -189,6 +192,8 @@ class ParameterStudy2D:
             (int(pair[0]), int(pair[1])) for pair in data.get("pending", [])
         )
         self._regions = [RegionConclusion.from_dict(item) for item in data.get("regions", [])]
+        self._reuse = [ReuseDecision.from_dict(item) for item in data.get("reuse", [])]
+        self._derived_from = data.get("derived_from")
 
     def _save(self) -> None:
         payload = {
@@ -198,6 +203,8 @@ class ParameterStudy2D:
             "points": [self._points[key].to_dict() for key in sorted(self._points)],
             "pending": [list(pair) for pair in sorted(self._pending)],
             "regions": [region.to_dict() for region in self._regions],
+            "reuse": [decision.to_dict() for decision in self._reuse],
+            "derived_from": self._derived_from,
         }
         temporary = self.manifest_path.with_name(f".{self.manifest_path.name}.tmp-{os.getpid()}")
         with temporary.open("w", encoding="utf-8") as handle:
@@ -216,6 +223,9 @@ class ParameterStudy2D:
 
     def regions(self) -> list[RegionConclusion]:
         return list(self._regions)
+
+    def reuse_decisions(self) -> list[ReuseDecision]:
+        return list(self._reuse)
 
     def add_checkpoints(self, coordinates: Sequence[Sequence[int]]) -> None:
         for pair in coordinates:
@@ -338,7 +348,158 @@ class ParameterStudy2D:
                         f"region {region.to_dict()} depends on point {coordinate} "
                         f"whose status {point.status!r} no longer matches"
                     )
+        errors.extend(review_reuse_decisions(self))
         return {"valid": not errors, "errors": errors}
+
+    def derive_branch(
+        self,
+        new_base_problem: Problem,
+        directory: str | Path,
+        values_x: Sequence[int] | None = None,
+        values_y: Sequence[int] | None = None,
+        subregion: Sequence[Sequence[int]] | None = None,
+        budget: SearchBudget | None = None,
+    ) -> "ParameterStudy2D":
+        if values_x is None:
+            values_x = sorted({x for x, _ in list(self._points) + self._pending})
+        if values_y is None:
+            values_y = sorted({y for _, y in list(self._points) + self._pending})
+        if not values_x or not values_y:
+            raise ValueError("cannot derive a branch without any parameter values")
+        if subregion is None:
+            target = {(int(x), int(y)) for x in values_x for y in values_y}
+        else:
+            target = {(int(pair[0]), int(pair[1])) for pair in subregion}
+            if not target:
+                raise ValueError("subregion must contain at least one coordinate")
+
+        branch = ParameterStudy2D(
+            directory,
+            new_base_problem,
+            self.axis_x,
+            values_x,
+            self.axis_y,
+            values_y,
+            budget or self.budget,
+        )
+        branch._derived_from = str(self.directory.resolve())
+        branch._pending = sorted(c for c in branch._pending if c in target)
+
+        decisions = list(branch._reuse)
+        decided = {(d.x, d.y) for d in decisions}
+        for coordinate in sorted(target):
+            if coordinate in decided or coordinate in branch._points:
+                continue
+            old_point = self._points.get(coordinate)
+            if old_point is None or not old_point.verified or old_point.status is None:
+                continue
+            old_effective = problem_at(
+                problem_at(self.base_problem, self.axis_x, coordinate[0]),
+                self.axis_y,
+                coordinate[1],
+            )
+            new_effective = problem_at(
+                problem_at(new_base_problem, self.axis_x, coordinate[0]),
+                self.axis_y,
+                coordinate[1],
+            )
+            change = classify_problem_change(old_effective, new_effective)
+            applied = old_point.status in change.reusable_statuses
+            decisions.append(
+                ReuseDecision(
+                    coordinate[0],
+                    coordinate[1],
+                    old_point.status,
+                    change.kind,
+                    applied,
+                    str(self.directory.resolve()),
+                    self.base_problem.canonical_hash(),
+                    new_base_problem.canonical_hash(),
+                    old_point.run_dir,
+                )
+            )
+            if applied:
+                branch._points[coordinate] = GridPoint(
+                    coordinate[0],
+                    coordinate[1],
+                    old_point.status,
+                    True,
+                    None,
+                    0,
+                    new_effective.canonical_hash(),
+                    old_point.run_dir,
+                )
+                if coordinate in branch._pending:
+                    branch._pending.remove(coordinate)
+        branch._reuse = decisions
+        branch._save()
+        return branch
+
+    def reuse_summary(self) -> dict:
+        reused: dict[str, list[Coordinate]] = {}
+        rejected: dict[str, list[Coordinate]] = {}
+        decided = set()
+        for decision in self._reuse:
+            decided.add(decision.coordinate)
+            bucket = reused if decision.applied else rejected
+            bucket.setdefault(decision.status, []).append(decision.coordinate)
+        new_coordinates = [
+            coordinate
+            for coordinate in self.pending_coordinates()
+            if coordinate not in decided
+        ]
+        return {
+            "model_version": self.base_problem.canonical_hash(),
+            "derived_from": self._derived_from,
+            "reused": {status: sorted(coords) for status, coords in sorted(reused.items())},
+            "requires_resolve": {
+                status: sorted(coords) for status, coords in sorted(rejected.items())
+            },
+            "new_coordinates": new_coordinates,
+            "pending": self.pending_coordinates(),
+            "note": (
+                "reused conclusions apply only to the recorded model version and "
+                "coordinates; points under requires_resolve and new_coordinates must "
+                "be solved before any region conclusion covers them"
+            ),
+        }
+
+    def request_coverage(
+        self,
+        coordinates: Sequence[Sequence[int]],
+        status: str | None = None,
+    ) -> dict:
+        if status is not None and status not in {item.value for item in ResultStatus}:
+            raise ValueError(f"unknown result status {status!r}")
+        cells = sorted({(int(pair[0]), int(pair[1])) for pair in coordinates})
+        if not cells:
+            raise ValueError("coverage request must contain at least one coordinate")
+        missing: list[Coordinate] = []
+        mismatched: list[tuple[Coordinate, str]] = []
+        statuses: dict[Coordinate, str] = {}
+        for cell in cells:
+            point = self._points.get(cell)
+            if point is None or not point.verified or point.status is None:
+                missing.append(cell)
+                continue
+            statuses[cell] = point.status
+            if status is not None and point.status != status:
+                mismatched.append((cell, point.status))
+        distinct = set(statuses.values())
+        verified = (
+            not missing
+            and not mismatched
+            and len(distinct) == 1
+            and (status is None or distinct == {status})
+        )
+        return {
+            "coordinates": cells,
+            "verified": verified,
+            "status": next(iter(distinct)) if verified else None,
+            "missing": missing,
+            "mismatched": mismatched,
+            "statuses": statuses,
+        }
 
     def derive(
         self,
@@ -411,4 +572,3 @@ class ParameterStudy2D:
                     best_distance = distance
                     best_assignment = result.best_assignment
         return best_assignment
-

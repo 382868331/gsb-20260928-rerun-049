@@ -1,4 +1,5 @@
 from .model import Constraint, ObjectiveSense, Problem, Variable
+from .branch import ModelChange, ReuseDecision, classify_problem_change
 from .grid import (
     GridPoint,
     ParameterStudy2D,
@@ -18,6 +19,7 @@ __all__ = [
     "BranchingStrategy",
     "Constraint",
     "GridPoint",
+    "ModelChange",
     "ObjectiveSense",
     "ParameterAxis",
     "ParameterStudy2D",
@@ -26,6 +28,7 @@ __all__ = [
     "RegionConclusion",
     "RegionReport",
     "ResultStatus",
+    "ReuseDecision",
     "SearchBudget",
     "SearchState",
     "SearchStore",
@@ -35,6 +38,7 @@ __all__ = [
     "VerificationReport",
     "Variable",
     "WidestDomain",
+    "classify_problem_change",
     "problem_at",
     "region_conflicts",
     "region_overlap",
