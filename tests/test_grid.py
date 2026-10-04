@@ -5,6 +5,7 @@ from pathlib import Path
 
 from optplatform import (
     Constraint,
+    CoverageConclusion,
     ParameterAxis,
     ParameterStudy2D,
     Problem,
@@ -48,6 +49,19 @@ def free_problem() -> Problem:
         "free",
         [Variable("x", 0, None), Variable("y", 0, None)],
         {"x": 0, "y": 0},
+    )
+
+
+def triangle_problem() -> Problem:
+    # "floor": -(x+y) <= rhs => x+y >= -rhs ; "sum": x+y <= rhs
+    return Problem(
+        "triangle",
+        [Variable("x", 0, 5), Variable("y", 0, 5)],
+        {"x": 1, "y": 1},
+        [
+            Constraint("floor", {"x": -1, "y": -1}, 0),
+            Constraint("sum", {"x": 1, "y": 1}, 5),
+        ],
     )
 
 
@@ -261,6 +275,78 @@ class GridStudyTests(unittest.TestCase):
         other = Problem("other", [Variable("x", 0, 6)], {"x": 1})
         with self.assertRaises(ValueError):
             ParameterStudy2D(self.directory / "study", other, FLOOR, [0], CAP, [0])
+
+    def make_triangle_study(self, name="triangle", **kwargs):
+        return ParameterStudy2D(
+            self.directory / name,
+            triangle_problem(),
+            FLOOR,
+            [-2, -1, 0],
+            ParameterAxis(ParameterAxis.CONSTRAINT_RHS, "sum"),
+            [4, 5],
+            **kwargs,
+        )
+
+    def test_coverage_reports_are_saved_and_reviewed(self) -> None:
+        study = self.make_triangle_study()
+        study.run()
+        subset = [(-2, 4), (-2, 5), (-1, 4), (-1, 5), (0, 5)]
+        line = [(-2, 4), (-2, 5)]
+        single = [(0, 5)]
+
+        for cells in (subset, line, single):
+            report = study.request_coverage(cells, status="optimal")
+            self.assertTrue(report["verified"])
+            self.assertIsNotNone(report["conclusion"])
+
+        coverages = study.coverages()
+        self.assertEqual(len(coverages), 3)
+        model_version = triangle_problem().canonical_hash()
+        for coverage, cells in zip(coverages, (subset, line, single)):
+            self.assertEqual(coverage.coordinates, tuple(sorted(map(tuple, cells))))
+            self.assertEqual(coverage.depends_on, coverage.coordinates)
+            self.assertEqual(coverage.status, "optimal")
+            self.assertEqual(coverage.model_version, model_version)
+
+        # the hole (0, 4) inside the bounding rectangle is not covered
+        self.assertFalse(coverages[0].covers(0, 4))
+        self.assertTrue(coverages[0].covers(0, 5))
+
+        # repeated requests do not duplicate or rewrite saved reports
+        study.request_coverage(subset, status="optimal")
+        self.assertEqual(study.coverages(), coverages)
+
+        reloaded = self.make_triangle_study()
+        self.assertEqual(reloaded.coverages(), coverages)
+        self.assertEqual(reloaded.pending_coordinates(), [])
+        self.assertTrue(reloaded.review_saved()["valid"])
+
+        # tampering with a depended-on point invalidates the saved coverage
+        manifest_path = self.directory / "triangle" / "study.json"
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for item in data["points"]:
+            if (item["x"], item["y"]) == (0, 5):
+                item["status"] = "infeasible"
+        manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        tampered = self.make_triangle_study()
+        report = tampered.review_saved()
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("coverage" in error for error in report["errors"]))
+
+    def test_coverage_saved_before_budget_pause_survives_reload(self) -> None:
+        study = self.make_triangle_study()
+        study.run(max_points=2)
+        self.assertEqual(len(study.pending_coordinates()), 4)
+        report = study.request_coverage([(-2, 4), (-2, 5)], status="optimal")
+        self.assertTrue(report["verified"])
+
+        reloaded = self.make_triangle_study()
+        self.assertEqual(len(reloaded.coverages()), 1)
+        self.assertEqual(len(reloaded.pending_coordinates()), 4)
+        reloaded.run()
+        self.assertEqual(reloaded.pending_coordinates(), [])
+        self.assertEqual(reloaded.coverages(), study.coverages())
+        self.assertTrue(reloaded.review_saved()["valid"])
 
 
 if __name__ == "__main__":

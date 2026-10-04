@@ -113,6 +113,34 @@ class RegionReport:
     conclusion: RegionConclusion | None
 
 
+@dataclass(frozen=True)
+class CoverageConclusion:
+    coordinates: tuple[Coordinate, ...]
+    status: str
+    model_version: str
+    depends_on: tuple[Coordinate, ...]
+
+    def covers(self, x: int, y: int) -> bool:
+        return (x, y) in self.coordinates
+
+    def to_dict(self) -> dict:
+        return {
+            "coordinates": [list(coordinate) for coordinate in self.coordinates],
+            "status": self.status,
+            "model_version": self.model_version,
+            "depends_on": [list(coordinate) for coordinate in self.depends_on],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping) -> "CoverageConclusion":
+        return cls(
+            tuple((int(pair[0]), int(pair[1])) for pair in data["coordinates"]),
+            data["status"],
+            data["model_version"],
+            tuple((int(pair[0]), int(pair[1])) for pair in data.get("depends_on", [])),
+        )
+
+
 def region_overlap(first: RegionConclusion, second: RegionConclusion) -> tuple[int, int, int, int] | None:
     x_min = max(first.x_min, second.x_min)
     x_max = min(first.x_max, second.x_max)
@@ -166,6 +194,7 @@ class ParameterStudy2D:
         self._points: dict[Coordinate, GridPoint] = {}
         self._pending: list[Coordinate] = []
         self._regions: list[RegionConclusion] = []
+        self._coverages: list[CoverageConclusion] = []
         self._reuse: list[ReuseDecision] = []
         self._derived_from: str | None = None
         if self.manifest_path.exists():
@@ -192,6 +221,9 @@ class ParameterStudy2D:
             (int(pair[0]), int(pair[1])) for pair in data.get("pending", [])
         )
         self._regions = [RegionConclusion.from_dict(item) for item in data.get("regions", [])]
+        self._coverages = [
+            CoverageConclusion.from_dict(item) for item in data.get("coverages", [])
+        ]
         self._reuse = [ReuseDecision.from_dict(item) for item in data.get("reuse", [])]
         self._derived_from = data.get("derived_from")
 
@@ -203,6 +235,7 @@ class ParameterStudy2D:
             "points": [self._points[key].to_dict() for key in sorted(self._points)],
             "pending": [list(pair) for pair in sorted(self._pending)],
             "regions": [region.to_dict() for region in self._regions],
+            "coverages": [coverage.to_dict() for coverage in self._coverages],
             "reuse": [decision.to_dict() for decision in self._reuse],
             "derived_from": self._derived_from,
         }
@@ -223,6 +256,9 @@ class ParameterStudy2D:
 
     def regions(self) -> list[RegionConclusion]:
         return list(self._regions)
+
+    def coverages(self) -> list[CoverageConclusion]:
+        return list(self._coverages)
 
     def reuse_decisions(self) -> list[ReuseDecision]:
         return list(self._reuse)
@@ -251,6 +287,7 @@ class ParameterStudy2D:
             ],
             "pending": self.pending_coordinates(),
             "regions": [region.to_dict() for region in self._regions],
+            "coverages": [coverage.to_dict() for coverage in self._coverages],
             "note": (
                 "only the listed discrete points are verified; no area between or around "
                 "points is claimed unless a region conclusion explicitly covers it"
@@ -346,6 +383,24 @@ class ParameterStudy2D:
                 elif point.status != region.status:
                     errors.append(
                         f"region {region.to_dict()} depends on point {coordinate} "
+                        f"whose status {point.status!r} no longer matches"
+                    )
+        model_version = self.base_problem.canonical_hash()
+        for coverage in self._coverages:
+            if coverage.model_version != model_version:
+                errors.append(
+                    f"coverage {coverage.to_dict()} belongs to model version "
+                    f"{coverage.model_version}, not {model_version}"
+                )
+            for coordinate in coverage.depends_on:
+                point = self._points.get(coordinate)
+                if point is None or not point.verified:
+                    errors.append(
+                        f"coverage {coverage.to_dict()} depends on unverified point {coordinate}"
+                    )
+                elif point.status != coverage.status:
+                    errors.append(
+                        f"coverage {coverage.to_dict()} depends on point {coordinate} "
                         f"whose status {point.status!r} no longer matches"
                     )
         errors.extend(review_reuse_decisions(self))
@@ -492,6 +547,17 @@ class ParameterStudy2D:
             and len(distinct) == 1
             and (status is None or distinct == {status})
         )
+        conclusion = None
+        if verified:
+            conclusion = CoverageConclusion(
+                tuple(cells),
+                next(iter(distinct)),
+                self.base_problem.canonical_hash(),
+                tuple(cells),
+            )
+            if conclusion not in self._coverages:
+                self._coverages.append(conclusion)
+                self._save()
         return {
             "coordinates": cells,
             "verified": verified,
@@ -499,6 +565,7 @@ class ParameterStudy2D:
             "missing": missing,
             "mismatched": mismatched,
             "statuses": statuses,
+            "conclusion": conclusion,
         }
 
     def derive(

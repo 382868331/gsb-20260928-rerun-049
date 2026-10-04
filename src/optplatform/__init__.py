@@ -1,6 +1,7 @@
 from .model import Constraint, ObjectiveSense, Problem, Variable
 from .branch import ModelChange, ReuseDecision, classify_problem_change
 from .grid import (
+    CoverageConclusion,
     GridPoint,
     ParameterStudy2D,
     RegionConclusion,
@@ -18,6 +19,7 @@ __all__ = [
     "BranchAndBound",
     "BranchingStrategy",
     "Constraint",
+    "CoverageConclusion",
     "GridPoint",
     "ModelChange",
     "ObjectiveSense",
