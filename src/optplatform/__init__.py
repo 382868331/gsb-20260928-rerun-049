@@ -12,6 +12,7 @@ from .proof import VerificationReport, review_proof, verify_proof
 from .search import BranchAndBound, BranchingStrategy, SearchBudget, SearchState, WidestDomain
 from .store import SearchStore
 from .sweep import ParameterAxis, ParameterSweep, SweepPoint, problem_at
+from .sampling import HierarchicalSampler2D, SamplingCandidate
 from .types import ResultStatus, SolveResult, StopReason
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "BranchingStrategy",
     "Constraint",
     "GridPoint",
+    "HierarchicalSampler2D",
     "ModelChange",
     "ObjectiveSense",
     "ParameterAxis",
@@ -35,6 +37,7 @@ __all__ = [
     "SolveResult",
     "StopReason",
     "SweepPoint",
+    "SamplingCandidate",
     "VerificationReport",
     "Variable",
     "WidestDomain",

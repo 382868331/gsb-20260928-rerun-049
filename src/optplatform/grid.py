@@ -490,7 +490,10 @@ class ParameterStudy2D:
                 coordinate[1],
             )
             change = classify_problem_change(old_effective, new_effective)
-            applied = old_point.status in change.reusable_statuses
+            applied = (
+                new_base_problem.canonical_hash() == self.base_problem.canonical_hash()
+                and old_point.status in change.reusable_statuses
+            )
             decisions.append(
                 ReuseDecision(
                     coordinate[0],
@@ -520,6 +523,37 @@ class ParameterStudy2D:
         branch._reuse = decisions
         branch._save()
         return branch
+
+    def model_replacement_report(self) -> dict:
+        comparison_only: dict[str, list[Coordinate]] = {}
+        reused: dict[str, list[Coordinate]] = {}
+        for decision in self._reuse:
+            bucket = reused if decision.applied else comparison_only
+            bucket.setdefault(decision.status, []).append(decision.coordinate)
+        blocked = sorted(
+            {
+                coordinate
+                for coords in comparison_only.values()
+                for coordinate in coords
+            }
+            | set(self.pending_coordinates())
+        )
+        return {
+            "model_version": self.base_problem.canonical_hash(),
+            "source_version": next(
+                (decision.source_version for decision in self._reuse), None
+            ),
+            "reused_observations": {key: sorted(value) for key, value in sorted(reused.items())},
+            "comparison_only": {
+                key: sorted(value) for key, value in sorted(comparison_only.items())
+            },
+            "resample_candidates": self.pending_coordinates(),
+            "conclusions_that_cannot_be_stitched": blocked,
+            "note": (
+                "comparison_only records are evidence from the previous model version only; "
+                "they do not verify the current model or fill domain holes"
+            ),
+        }
 
     def reuse_summary(self) -> dict:
         reused: dict[str, list[Coordinate]] = {}

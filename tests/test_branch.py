@@ -53,24 +53,29 @@ class BranchTestCase(unittest.TestCase):
     def derive(self, new_base, name="branch", **kwargs):
         return self.study.derive_branch(new_base, self.root / name, **kwargs)
 
-    def test_tightened_constraint_reuses_only_infeasible(self):
+    def test_tightened_model_keeps_old_results_for_comparison_only(self):
         branch = self.derive(make_base(1))
         summary = branch.reuse_summary()
-        self.assertEqual(summary["reused"]["infeasible"], [(0, 2), (0, 3)])
+        self.assertEqual(summary["reused"], {})
+        self.assertEqual(
+            summary["requires_resolve"]["infeasible"], [(0, 2), (0, 3)]
+        )
         self.assertEqual(
             summary["requires_resolve"]["optimal"],
             [(1, 2), (1, 3), (2, 2), (2, 3), (3, 2), (3, 3)],
         )
         self.assertEqual(summary["new_coordinates"], [])
-        self.assertEqual(
-            summary["pending"], [(1, 2), (1, 3), (2, 2), (2, 3), (3, 2), (3, 3)]
-        )
+        self.assertEqual(len(summary["pending"]), 8)
         self.assertEqual(summary["model_version"], make_base(1).canonical_hash())
         self.assertEqual(summary["derived_from"], str(self.old_dir.resolve()))
-        for coordinate in [(0, 2), (0, 3)]:
-            point = branch.point(*coordinate)
-            self.assertTrue(point.verified)
-            self.assertEqual(point.status, "infeasible")
+        self.assertIsNone(branch.point(0, 2))
+        replacement = branch.model_replacement_report()
+        self.assertEqual(
+            replacement["comparison_only"]["infeasible"], [(0, 2), (0, 3)]
+        )
+        self.assertEqual(
+            len(replacement["conclusions_that_cannot_be_stitched"]), 8
+        )
         self.assertTrue(branch.review_saved()["valid"])
 
     def test_tightened_branch_resolves_changed_interior_optimum(self):
@@ -97,10 +102,13 @@ class BranchTestCase(unittest.TestCase):
         )
         self.assertEqual(len(summary["pending"]), 8)
 
-    def test_objective_change_reuses_only_infeasible(self):
+    def test_objective_change_requires_resampling(self):
         branch = self.derive(make_base(6, objective={"x": 3, "y": 1}))
         summary = branch.reuse_summary()
-        self.assertEqual(summary["reused"]["infeasible"], [(0, 2), (0, 3)])
+        self.assertEqual(summary["reused"], {})
+        self.assertEqual(
+            summary["requires_resolve"]["infeasible"], [(0, 2), (0, 3)]
+        )
         self.assertEqual(len(summary["requires_resolve"]["optimal"]), 6)
         decision = next(d for d in branch.reuse_decisions() if d.coordinate == (0, 2))
         self.assertEqual(decision.rule, "objective_changed")
@@ -123,26 +131,27 @@ class BranchTestCase(unittest.TestCase):
     def test_region_not_verified_from_corners_alone(self):
         branch = self.derive(make_base(1))
         report = branch.request_region_conclusion((0, 0), (2, 3), status="infeasible")
-        self.assertTrue(report.verified)
+        self.assertFalse(report.verified)
+        self.assertEqual(set(report.missing), {(0, 2), (0, 3)})
         report = branch.request_region_conclusion((0, 2), (2, 2))
         self.assertFalse(report.verified)
-        self.assertEqual(list(report.missing), [(1, 2), (2, 2)])
-        self.assertEqual(report.statuses[(0, 2)], "infeasible")
+        self.assertEqual(list(report.missing), [(0, 2), (1, 2), (2, 2)])
 
     def test_cross_version_statuses_not_conflated(self):
         branch = self.derive(make_base(1))
         report = branch.request_region_conclusion((0, 0), (2, 3), status="optimal")
         self.assertFalse(report.verified)
-        self.assertEqual(len(report.mismatched), 2)
-        self.assertEqual(
-            sorted(status for _, status in report.mismatched), ["infeasible"] * 2
-        )
+        self.assertEqual(report.mismatched, ())
+        self.assertEqual(len(report.missing), 2)
 
     def test_non_rectangular_subregion(self):
         branch = self.derive(make_base(1), subregion=[(0, 2), (2, 3), (3, 3)])
         summary = branch.reuse_summary()
-        self.assertEqual(summary["reused"]["infeasible"], [(0, 2)])
-        self.assertEqual(summary["pending"], [(2, 3), (3, 3)])
+        self.assertEqual(summary["reused"], {})
+        self.assertEqual(
+            summary["requires_resolve"]["infeasible"], [(0, 2)]
+        )
+        self.assertEqual(summary["pending"], [(0, 2), (2, 3), (3, 3)])
         self.assertIsNone(branch.point(1, 2))
         self.assertIsNone(branch.point(3, 2))
 
@@ -220,40 +229,32 @@ class BranchTestCase(unittest.TestCase):
     def test_reopen_preserves_reuse_regions_and_holes(self):
         branch = self.derive(make_base(1))
         report = branch.request_region_conclusion((0, 0), (2, 3), status="infeasible")
-        self.assertTrue(report.verified)
+        self.assertFalse(report.verified)
         branch.run(max_points=1)
-        self.assertEqual(
-            branch.pending_coordinates(), [(1, 3), (2, 2), (2, 3), (3, 2), (3, 3)]
-        )
+        self.assertEqual(branch.pending_coordinates()[0], (0, 3))
 
         reopened = ParameterStudy2D(
             self.root / "branch", make_base(1), AXIS_X, VALUES_X, AXIS_Y, VALUES_Y
         )
         summary = reopened.reuse_summary()
-        self.assertEqual(summary["reused"]["infeasible"], [(0, 2), (0, 3)])
-        self.assertEqual(
-            reopened.pending_coordinates(), [(1, 3), (2, 2), (2, 3), (3, 2), (3, 3)]
-        )
-        self.assertEqual(len(reopened.regions()), 1)
+        self.assertEqual(summary["reused"], {})
+        self.assertEqual(len(reopened.pending_coordinates()), 7)
+        self.assertEqual(len(reopened.regions()), 0)
         self.assertTrue(reopened.review_saved()["valid"])
         reopened.run()
         self.assertEqual(reopened.pending_coordinates(), [])
         self.assertTrue(reopened.review_saved()["valid"])
 
-    def test_tampered_reuse_record_is_rejected(self):
+    def test_comparison_only_reuse_record_does_not_create_observations(self):
         branch = self.derive(make_base(1))
         self.assertTrue(branch.review_saved()["valid"])
         manifest = json.loads((self.root / "branch" / "study.json").read_text())
-        for record in manifest["reuse"]:
-            if record["applied"]:
-                record["status"] = "optimal"
-        (self.root / "branch" / "study.json").write_text(json.dumps(manifest))
+        self.assertFalse(any(record["applied"] for record in manifest["reuse"]))
         reopened = ParameterStudy2D(
             self.root / "branch", make_base(1), AXIS_X, VALUES_X, AXIS_Y, VALUES_Y
         )
-        report = reopened.review_saved()
-        self.assertFalse(report["valid"])
-        self.assertTrue(any("reuse" in error for error in report["errors"]))
+        self.assertTrue(reopened.review_saved()["valid"])
+        self.assertIsNone(reopened.point(0, 2))
 
     def test_classify_problem_change_rules(self):
         base = make_base(6)

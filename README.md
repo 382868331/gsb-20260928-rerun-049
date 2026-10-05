@@ -117,24 +117,53 @@ if report.verified:
 新测量调整约束后，`derive_branch(新基准问题, 新目录, values_x=..., values_y=..., subregion=...)` 从已完成的区域研究派生新模型分支。分支对每个目标坐标逐一比较旧、新有效问题并分类变化，只复用该变化规则下仍然成立的结论：
 
 - `identical`：有效问题完全一致，全部终态结论可复用。
-- `constraint_tightened`：约束收紧（系数不变、右端变小），只复用 `infeasible`；旧最优解可能已被切掉，必须重新求解。
+- `constraint_tightened`：约束收紧（系数不变、右端变小）时记录旧 `infeasible` 仅用于对照；当前模型必须重新采样，旧最优解可能已被切掉。
 - `constraint_relaxed`：约束放宽，任何结论都不可复用（旧不可行可能变可行，旧最优可能被超越）。
-- `objective_changed`：可行域不变，只复用 `infeasible`；最优性必须重新证明。
+- `objective_changed`：可行域不变，但最优性必须重新证明；旧结果只保留在对照记录中。
 - `constraint_changed` / `model_changed`：约束系数或变量结构变化，不可复用。
 
 ```python
 branch = study.derive_branch(new_base_problem, "runs/band-v2")
 branch.reuse_summary()
-# reused: 按结论分组的复用坐标；requires_resolve: 有旧结果但不可复用；
+# reused: 仅当新旧基准模型指纹完全相同才出现；
+# requires_resolve: 有旧结果但模型已替换，必须重新采样；
 # new_coordinates: 参数范围变化带来的新坐标；pending: 待算空洞
+branch.model_replacement_report()
+# comparison_only: 可用于人工比较的旧模型观测；
+# conclusions_that_cannot_be_stitched: 暂时不能跨模型拼接的结论坐标
 ```
 
-- 每条复用决策记录适用的模型版本（新基准指纹）、来源版本、坐标、结论与规则，写入 `study.json`；`review_saved()` 会重新加载来源研究并独立重算分类，篡改复用记录会被判为无效。
-- 复用是逐点判定的：即使新区域四个角点都有可复用的旧结果，内部未核实的点仍会让 `request_region_conclusion` 返回缺失报告，不会把整个区域标成已验证。跨版本记录中不可行、最优与待检查分别成组，互不混用。
+- 每条复用决策记录适用的模型版本（新基准指纹）、来源版本、坐标、结论与规则，写入 `study.json`；`review_saved()` 会重新加载来源研究并独立重算分类。模型版本变化时记录只作对照，不会生成当前模型的已核实点。
+- 复用是逐点判定的：即使新区域四个角点都有旧结果，内部未核实的点仍会让 `request_region_conclusion` 返回缺失报告，不会把整个区域标成已验证。跨版本记录中不可行、最优与待检查分别成组，互不混用。
 - `subregion=[(x, y), ...]` 允许只沿一个非矩形子区域继续计算；`request_coverage(坐标集合)` 对任意形状（含退化成线或点的集合）逐点核对。核对通过时，报告会把精确坐标集合、模型版本和 `depends_on` 依赖点写入区域记录并重开可查；外接矩形中未列入集合的空洞不会被该记录覆盖。
 - 预算中断后保存重开：复用结论、已核实区域和待检查空洞都持久化在清单里，重开不会丢失已核对区域，也不会自动补齐空洞。
 
 约束交叉导致内部最优解变化的完整示例见 `examples/constraint_crossing.py`。
+
+## 分层加密采样
+
+`HierarchicalSampler2D` 在 `ParameterStudy2D` 之上管理采样预算和待选顺序。调用者提供精确坐标集合 `domain`、x/y 两轴的最小间距和必须保留的观测点；外接矩形中的空洞、断开的窄带和孤立点不会被加入计划。
+
+```python
+from optplatform import HierarchicalSampler2D
+
+sampler = HierarchicalSampler2D(
+    study,
+    domain=[(0, 0), (0, 1), (4, 0), (8, 8)],
+    total_budget=20,
+    minimum_spacing=(1, 1),
+    required=[(0, 1), (8, 8)],
+)
+sampler.run(max_points=5)  # 人工停止时只保存，不丢弃待选点
+sampler.candidate_report()
+# required/component_seed/coarse/adaptive 分别解释必保留、断开区域、
+# 初始粗网格和局部变化加密；adaptive 记录触发它的两个相邻结果
+```
+
+- 初始计划先保留每个断开区域中的必保留点，再在精确域内放置粗网格点；之后只在已算相邻结果变化时加入轴上中点或对角中点。
+- 每个候选点持久化在 `sampling.json` 中，字段包含坐标、原因、来源、依赖的相邻点、已扣费集合和待选顺序。预算用尽后重开同一模型版本会继续排队列，不会对已扣费点重复收费。
+- 已算点只有在该坐标的有效问题指纹等于当前模型版本时才会被采样器接受；用新模型重开旧 `sampling.json` 会直接报错，必须建立新模型的采样计划。旧模型结果可通过 `model_replacement_report()` 与重新采样方案对照，但不会填平空洞或拼接区域结论。
+- `request_coverage()` 始终按传入的精确坐标集合核对覆盖；两条窄带和一个孤立区域即使拥有相同外接矩形，也只覆盖集合内实际已核实的点。
 
 ## 快速开始
 
