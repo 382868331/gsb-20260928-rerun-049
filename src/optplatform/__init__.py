@@ -9,6 +9,7 @@ from .grid import (
     region_overlap,
 )
 from .proof import VerificationReport, review_proof, verify_proof
+from .sampling import HierarchicalSamplingPlan2D, SamplingCandidate
 from .search import BranchAndBound, BranchingStrategy, SearchBudget, SearchState, WidestDomain
 from .store import SearchStore
 from .sweep import ParameterAxis, ParameterSweep, SweepPoint, problem_at
@@ -19,6 +20,7 @@ __all__ = [
     "BranchingStrategy",
     "Constraint",
     "GridPoint",
+    "HierarchicalSamplingPlan2D",
     "ModelChange",
     "ObjectiveSense",
     "ParameterAxis",
@@ -29,6 +31,7 @@ __all__ = [
     "RegionReport",
     "ResultStatus",
     "ReuseDecision",
+    "SamplingCandidate",
     "SearchBudget",
     "SearchState",
     "SearchStore",

@@ -304,14 +304,21 @@ class ParameterStudy2D:
             if max_points is not None and completed >= max_points:
                 break
             coordinate = self._pending.pop(0)
-            point = self._solve_point(coordinate, budget)
-            self._points[coordinate] = point
+            point = self.run_point(coordinate[0], coordinate[1], budget)
             if not point.verified and point.stop_reason in BUDGET_STOP_REASONS:
-                self._pending.insert(0, coordinate)
-                self._save()
                 return
             completed += 1
-            self._save()
+
+    def run_point(self, x: int, y: int, budget: SearchBudget | None = None) -> GridPoint:
+        coordinate = (int(x), int(y))
+        if coordinate in self._pending:
+            self._pending.remove(coordinate)
+        point = self._solve_point(coordinate, budget or self.budget)
+        self._points[coordinate] = point
+        if not point.verified and point.stop_reason in BUDGET_STOP_REASONS:
+            self._pending.insert(0, coordinate)
+        self._save()
+        return point
 
     def request_region_conclusion(
         self,

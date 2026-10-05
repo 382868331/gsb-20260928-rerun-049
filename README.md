@@ -134,6 +134,30 @@ branch.reuse_summary()
 - `subregion=[(x, y), ...]` 允许只沿一个非矩形子区域继续计算；`request_coverage(坐标集合)` 对任意形状（含退化成线或点的集合）逐点核对。核对通过时，报告会把精确坐标集合、模型版本和 `depends_on` 依赖点写入区域记录并重开可查；外接矩形中未列入集合的空洞不会被该记录覆盖。
 - 预算中断后保存重开：复用结论、已核实区域和待检查空洞都持久化在清单里，重开不会丢失已核对区域，也不会自动补齐空洞。
 
+### 分层加密采样
+
+`HierarchicalSamplingPlan2D` 在任意精确坐标集合上管理采样预算。初始网格按两个坐标方向的最小间距的两倍取样，必填点不受网格限制；邻点只在同一行或同一列、且中间路径仍完全属于指定区域时才被视为相邻。局部状态或目标值发生变化时，在二者中点加入下一层候选，中点距离不会小于给定最小间距。
+
+```python
+plan = HierarchicalSamplingPlan2D(
+    study,
+    domain=[(0, 0), (0, 2), (5, 1)],  # 可以有窄带、空洞、断点和孤立点
+    total_budget=30,
+    min_spacing=(2, 2),
+    required=[(5, 1)],
+)
+plan.run(max_points=5)  # 人工停止时已算点和待选点都已保存
+
+for candidate in plan.candidates():
+    candidate.reason  # initial lattice / required / local refinement between ...
+```
+
+- 采样计划写入独立的 `sampling.json`，记录区域、预算、模型版本、已花费点数、实际观测顺序、待选点和每个点的选择原因。
+- 重开后按模型版本、区域、最小间距和预算校验计划；已经成功完成的点计入 `spent`，未完成的候选保持待选，不会重复扣费或重新求解。
+- 已有的同坐标结果只有在有效问题指纹属于当前模型版本时才会复用；跨模型版本的旧点只保留为旧证据。
+- `request_domain_coverage()` 只检查精确 `domain` 集合，不检查也不填平其外接矩形；断开的窄带、空洞和孤立区域必须逐点齐备后才能形成覆盖结论。
+- `compare_model_replacement(new_study)` 并列给出 `legacy_observations` 与 `resample_candidates`；模型版本不同且某坐标尚未在新模型下重算时，该坐标列入 `not_spliceable`，不能把旧结论和新覆盖拼接。
+
 约束交叉导致内部最优解变化的完整示例见 `examples/constraint_crossing.py`。
 
 ## 快速开始
